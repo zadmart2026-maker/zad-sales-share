@@ -1004,8 +1004,9 @@ async function makeView() {
 const hourOrder = h => (h - S.cutoff + 24) % 24;
 
 async function applyFilters() {
-  busy('جارٍ تحليل الفترة المحددة…');
-  document.body.classList.add('loading');
+  // التحديث في الخلفية لا يحجب الشاشة
+  const quiet = S.quiet;
+  if (!quiet) { busy('جارٍ تحليل الفترة المحددة…'); document.body.classList.add('loading'); }
   try {
     const [pf, pt] = cmpRange();
     await makeView();
@@ -1019,7 +1020,7 @@ async function applyFilters() {
     await q(`CREATE OR REPLACE TABLE nm AS SELECT code, ANY_VALUE(name) AS name, ANY_VALUE(cat) AS cat FROM cur GROUP BY code`);
     S.dirty = new Set(TABS);
     await renderTab(S.tab);
-  } finally { document.body.classList.remove('loading'); busy(); }
+  } finally { if (!quiet) { document.body.classList.remove('loading'); busy(); } }
 }
 
 /* ============ التبويبات ============ */
@@ -3626,16 +3627,26 @@ const IDB = {
   set(k, v) { return this.run('readwrite', s => s.put(v, k)); },
   del(k) { return this.run('readwrite', s => s.delete(k)); },
 };
-async function persistSales() {
+/** تُحفظ الأشهر الأخيرة منفصلة عن الأقدم حتى يبدأ العرض منها فوراً. months = الأشهر المتغيّرة (بدونها يُحفظ كل شيء) */
+async function parquetOf(where, file) {
+  await q(`COPY (SELECT * FROM sales WHERE ${where}) TO '${file}' (FORMAT PARQUET, COMPRESSION SNAPPY)`);
+  const buf = await S.db.copyFileToBuffer(file);
+  await S.db.dropFile(file);
+  return buf;
+}
+async function persistSales(months = null) {
   if (S.isDemo) return;
   try {
-    await q(`COPY sales TO 'zad_store.parquet' (FORMAT PARQUET, COMPRESSION SNAPPY)`);
-    const buf = await S.db.copyFileToBuffer('zad_store.parquet');
-    await S.db.dropFile('zad_store.parquet');
-    await IDB.set('sales', buf);
-    await IDB.set('savedAt', new Date().toISOString());
+    const mx = (await q(`SELECT strftime(MAX(ts), '%Y-%m-%d') m FROM sales`))[0].m;
+    const d = D(monthStart(mx)); d.setUTCMonth(d.getUTCMonth() - RECENT_MONTHS);
+    const cut = iso(d), prev = await IDB.get('salesCut');
+    const rewriteOld = !months || prev !== cut || [...months].some(m => m + '-01' < cut);
+    const recent = await parquetOf(`ts >= TIMESTAMP '${cut}'`, 'zad_store.parquet');
+    const old = rewriteOld ? await parquetOf(`ts < TIMESTAMP '${cut}'`, 'zad_store_old.parquet') : null;
+    // كتابة واحدة حتى لا يبقى الحد الفاصل مختلفاً بين الجزأين (فتتكرر أسطر) إذا انقطع الحفظ في منتصفه
+    await IDB.run('readwrite', s => { s.put(recent, 'sales'); if (old) s.put(old, 'salesOld'); s.put(cut, 'salesCut'); return s.put(new Date().toISOString(), 'savedAt'); });
     S.saved = true; updateStatus();
-  } catch (e) { console.error(e); toast('تعذر حفظ البيانات على هذا الجهاز. استخدم «حفظ نسخة سريعة» حتى لا تضيع.'); }
+  } catch (e) { console.error(e); toast('تعذر حفظ البيانات على هذا الجهاز، وسيُعاد تحميلها في الفتح القادم.'); }
 }
 /** الأصناف الممسوحة وصورة المخزون وأسماء مستخدمي الكاش تُحفظ منفصلة عن المبيعات */
 async function persistTable(t, key) {
@@ -3676,7 +3687,6 @@ async function restoreSales() {
   if (!buf) return false;
   busy('جارٍ فتح البيانات المحفوظة…');
   try {
-    await restoreDeleted();
     await S.db.registerFileBuffer('zad_restore.parquet', new Uint8Array(buf));
     const cols = (await q(`DESCRIBE SELECT * FROM read_parquet('zad_restore.parquet')`)).map(r => r.column_name);
     // ترتيب الأسطر داخل الجدول لا يهم أي تقرير، وعدم الالتزام به يسرّع القراءة كثيراً
@@ -3706,7 +3716,8 @@ function updateStatus() {
   const m = S.meta;
   $('#status').textContent = `${nf(m.n)} سطر · ${nf(m.invs)} فاتورة · ${nf(m.ni)} صنف · من ${m.mn} إلى ${m.mx}` +
     (S.isDemo ? ' · بيانات تجريبية (غير محفوظة)' : S.saved ? ' · محفوظة على هذا الجهاز ✓' : '') +
-    (S.syncAt && !S.isDemo ? ` · آخر تحديث من قاعدة البيانات ${new Date(S.syncAt).toLocaleString('en-GB', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}` : '');
+    (S.syncAt && !S.isDemo ? ` · آخر تحديث من قاعدة البيانات ${new Date(S.syncAt).toLocaleString('en-GB', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}` : '') +
+    (S.openSecs ? ` · فُتح خلال ${S.openSecs} ث` : '');
 }
 $('#btnClearData').addEventListener('click', async () => {
   const b = $('#btnClearData');
@@ -3894,6 +3905,7 @@ async function runSync(interactive) {
 const SB_URL = 'https://tzonjieutboavbsmoqjt.supabase.co';
 const SB_KEY = 'sb_publishable_vZjzecEk4StdKbTH-wdHhw_Ko98F2oe';
 const sb = window.supabase.createClient(SB_URL, SB_KEY);
+const RECENT_MONTHS = 2;   // تُعرض فوراً هذه الأشهر مع الشهر الجاري (تكفي للفترة الافتراضية ومقارنتها)، والأقدم يُحمَّل في الخلفية
 const PROFIT_COL = /ربح|هامش|كلفة|تكلفة|مشتريات|مرتجع للموردين|العروض الناجحة|التقييم/;
 const PERM = { user: null, profile: null, depts: [], tabs: [] };
 const TAB_LIST = $$('#tabs button').map(b => [b.dataset.tab, b.textContent.trim()]);
@@ -3971,7 +3983,8 @@ async function buildFromFiles(list, ch = null) {
   };
   const first = (a, b) => list.some(m => m.ds === a) ? a : b;
   const monthList = set => [...set].map(lit).join(', ');
-  busy(ch ? 'جارٍ تحديث البيانات…' : 'جارٍ تجهيز البيانات… قد يأخذ دقيقة في المرة الأولى');
+  // التحديث الجزئي يتم في الخلفية؛ البناء الكامل (أول مرة فقط) يعرض رسالة انتظار
+  if (ch) { S.quiet = true; $('#status').textContent = 'جارٍ تطبيق البيانات الجديدة…'; } else busy('جارٍ تجهيز البيانات… قد يأخذ دقيقة في المرة الأولى');
   try {
     // دليل الأصناف والعائلات
     if (!ch || ch.master) {
@@ -4009,7 +4022,6 @@ async function buildFromFiles(list, ch = null) {
     const mSales = ch ? ch.sales : null, mVoids = ch ? ch.voids : null, mOff = ch ? ch.offday : null;
     if (!ch) { await q(`DELETE FROM sales`); await q(`DELETE FROM deleted`); await q(`DELETE FROM offday`); }
     else {
-      if (mSales.size) await q(`DELETE FROM sales WHERE strftime(ts, '%Y-%m') IN (${monthList(mSales)})`);
       if (mVoids.size) await q(`DELETE FROM deleted WHERE strftime(ts, '%Y-%m') IN (${monthList(mVoids)})`);
       if (mOff.size) await q(`DELETE FROM offday WHERE strftime(date, '%Y-%m') IN (${monthList(mOff)})`);
     }
@@ -4018,7 +4030,8 @@ async function buildFromFiles(list, ch = null) {
     const br = `CASE r.store ${Object.entries(SYNC_BRANCH).map(([k, v]) => `WHEN ${k} THEN ${lit(v)}`).join(' ')} ELSE 'فرع ' || r.store END`;
     const names = `(SELECT code, ANY_VALUE(name) AS name FROM items_master WHERE code IS NOT NULL AND name IS NOT NULL GROUP BY code)`;
     const s = e => `CASE WHEN r.k = 'R' THEN -ABS(${e}) ELSE ${e} END`;
-    if (base.length) await q(`INSERT INTO sales
+    // تُجهَّز الأسطر الجديدة في جدول مؤقت أولاً، ثم تُستبدل دفعة واحدة حتى لا يرى المستخدم شهراً ناقصاً أثناء العمل
+    if (base.length) await q(`CREATE OR REPLACE TEMP TABLE sales_new AS
       SELECT CASE WHEN r.k = 'R' THEN 'R|' ELSE '' END || ${br} || '|' || r.doc, r.ts, trim(r.code), COALESCE(m.name, trim(r.code)), 'غير مصنف',
         ${s('r.qty')}, CASE WHEN r.qty <> 0 THEN ABS(r.amount / r.qty) ELSE ABS(r.amount) END, ${s('r.amount')}, ${cost.length ? s('c.cost') : 'NULL'},
         ${br}, ${who.length ? 'w.pos' : 'NULL'}, ${who.length ? `CASE WHEN r.k = 'R' THEN NULL ELSE NULLIF(CAST(w.cust AS VARCHAR), '0') END` : 'NULL'}, NULL,
@@ -4027,6 +4040,13 @@ async function buildFromFiles(list, ch = null) {
       ${cost.length ? `LEFT JOIN read_csv([${cost.join(', ')}], header = true, columns = {'rid': 'BIGINT', 'cost': 'DOUBLE'}) c ON c.rid = r.rid` : ''}
       ${who.length ? `LEFT JOIN read_csv([${who.join(', ')}], header = true, quote = '"', columns = {'rid': 'BIGINT', 'pos': 'VARCHAR', 'user': 'INTEGER', 'cust': 'BIGINT'}) w ON w.rid = r.rid` : ''}
       LEFT JOIN ${names} m ON m.code = trim(r.code)`);
+    if (ch && mSales.size) {
+      await q(`BEGIN TRANSACTION`);
+      await q(`DELETE FROM sales WHERE strftime(ts, '%Y-%m') IN (${monthList(mSales)})`);
+      if (base.length) await q(`INSERT INTO sales SELECT * FROM sales_new`);
+      await q(`COMMIT`);
+    } else if (base.length) await q(`INSERT INTO sales SELECT * FROM sales_new`);
+    if (base.length) await q(`DROP TABLE sales_new`);
     const dl = ch && !mVoids.size ? [] : await load('voids', null, mVoids);
     if (dl.length) await q(`INSERT INTO deleted
       SELECT CAST(r.ts AS DATE) + COALESCE(TRY_CAST(substr(r.added, 12, 8) AS TIME), CAST(r.ts AS TIME)), trim(r.code), COALESCE(m.name, trim(r.code)),
@@ -4043,15 +4063,33 @@ async function buildFromFiles(list, ch = null) {
     await applyMaster();
     S.isDemo = false;
     S.keepView = !!ch;   // التحديث في الخلفية لا يغيّر الفترة والفلاتر التي يعمل عليها المستخدم
+    // ربط العائلات يُعاد حسابه فقط إذا تغيّر دليل الأصناف
+    const famSame = !!ch && !ch.master;
+    S.famReady = famSame;
     await onDataLoaded();
-    await persistSales();
-    if (!ch || ch.refs.size || mVoids.size || mOff.size) await persistDeleted();
-    await persistTable('fam_map', 'famMap').catch(e => console.error(e));
+    await persistSales(ch ? ch.sales : null);
+    if (!ch || ch.refs.size || mVoids.size || mOff.size || ch.users) await persistDeleted();
+    if (!famSame) await persistTable('fam_map', 'famMap').catch(e => console.error(e));
     await IDB.set('builtFrom', list.map(m => m.path).join('\n'));
   } finally {
     for (const fn of reg) try { await S.db.dropFile(fn); } catch {}
-    busy();
+    if (ch) S.quiet = false; else busy();
   }
+}
+/** بعد عرض الأشهر الأخيرة: تُحمَّل الأشهر الأقدم وبقية الجداول في الخلفية */
+async function loadRest() {
+  $('#status').textContent = 'البيانات الأخيرة جاهزة · جارٍ تحميل الأشهر الأقدم في الخلفية…';
+  await restoreDeleted();
+  const old = await IDB.get('salesOld');
+  if (old) {
+    await S.db.registerFileBuffer('zad_restore_old.parquet', new Uint8Array(old));
+    await q(`SET preserve_insertion_order = false`);
+    await q(`INSERT INTO sales SELECT * FROM read_parquet('zad_restore_old.parquet')`);
+    await q(`SET preserve_insertion_order = true`);
+    await S.db.dropFile('zad_restore_old.parquet');
+  }
+  S.quiet = true; S.keepView = true; S.famReady = true;
+  try { await onDataLoaded(); } finally { S.quiet = false; }
 }
 /** يجلب من السيرفر ما تغيّر ويعيد البناء عند الحاجة */
 async function refreshData(interactive) {
@@ -4136,10 +4174,19 @@ async function startApp(user) {
   if (prev !== identity) { await wipeLocal(); await IDB.set('identity', identity); }
   await initDB();
   await loadMasterFromStore();
-  $('#btnSync').disabled = false;
-  // فتح سريع مما حُفظ على هذا الجهاز، ثم جلب ما تغيّر
+  // فتح سريع مما حُفظ على هذا الجهاز: الأشهر الأخيرة أولاً، ثم الأقدم، ثم جلب ما تغيّر
   let built = null; try { built = await IDB.get('builtFrom'); } catch {}
-  if (built) await restoreSales();
+  if (built && await restoreSales()) {
+    S.openSecs = Math.round(performance.now() / 1000);
+    updateStatus();
+    try { await loadRest(); }
+    catch (e) {
+      // لا يُكمل التحديث والبيانات ناقصة، حتى لا تُحفظ نسخة بلا الأشهر القديمة
+      console.error(e); toast('تعذر فتح الأشهر الأقدم المحفوظة. اضغط «خروج» ثم ادخل من جديد لإعادة تحميلها.');
+      return;
+    }
+  }
+  $('#btnSync').disabled = false;
   try { await refreshData(false); }
   catch (e) {
     // البيانات المحفوظة تبقى معروضة إذا تعذر جلب الجديد
@@ -4150,6 +4197,7 @@ async function startApp(user) {
   if (S.loaded) try {
     if (!(await IDB.get('masterPq'))) await persistTable('items_master', 'masterPq');
     if (!(await IDB.get('famMap'))) await persistTable('fam_map', 'famMap');
+    if (!(await IDB.get('salesCut'))) await persistSales();
   } catch (e) { console.error(e); }
 }
 $('#loginForm').addEventListener('submit', async e => {
