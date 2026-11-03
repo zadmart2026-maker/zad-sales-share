@@ -3302,6 +3302,18 @@ function catSQL(nameExpr) {
 /* ---- دليل الأصناف (المجموعات والتكلفة) — يُحفظ في المتصفح ويُطبّق على كل استيراد ---- */
 // الدليل يُحفظ في IndexedDB (يتسع لعشرات آلاف الأصناف مع العائلات). النسخ القديمة كانت في localStorage.
 async function loadMasterFromStore() {
+  // نسخة جاهزة أسرع بكثير من إدخال عشرات آلاف الأصناف سطراً سطراً عند كل فتح
+  try {
+    const pq = await IDB.get('masterPq');
+    if (pq) {
+      await S.db.registerFileBuffer('zad_master_r.parquet', new Uint8Array(pq));
+      await q(`CREATE OR REPLACE TABLE items_master AS SELECT * FROM read_parquet('zad_master_r.parquet')`);
+      await S.db.dropFile('zad_master_r.parquet');
+      S.hasFam = (await q(`SELECT COUNT(l2) n FROM items_master`))[0].n > 0;
+      S.famDirty = true;
+      return (await q(`SELECT COUNT(*) n FROM items_master`))[0].n;
+    }
+  } catch (e) { console.error(e); }
   let rows = null;
   try { rows = await IDB.get('master'); } catch {}
   if (!rows) { try { rows = JSON.parse(store.get('zad.master', '[]')); } catch { rows = []; } }
@@ -3431,7 +3443,8 @@ async function importMaster(m) {
 
 /* ============ بعد تحميل البيانات ============ */
 async function onDataLoaded() {
-  S.famDirty = true;
+  S.famDirty = !S.famReady; S.famReady = false;
+  const keep = S.keepView && S.loaded; S.keepView = false;
   await makeView();
   const m = (await q(`SELECT COUNT(*) n, COUNT(DISTINCT inv) FILTER (WHERE inv NOT LIKE 'R|%') invs, strftime(MIN(d),'%Y-%m-%d') mn, strftime(MAX(d),'%Y-%m-%d') mx, COUNT(line_cost) nc,
     COUNT(DISTINCT branch) nb, COUNT(cust) ncu, COUNT(DISTINCT cashier) nca, COUNT(DISTINCT pay) np, COUNT(DISTINCT code) ni, COUNT(tax) ntax, COUNT(*) FILTER (WHERE amount < 0) nret, COUNT(*) FILTER (WHERE cat IN (${AUTO_CATS.map(lit).join(",")})) nauto FROM sv`))[0];
@@ -3439,9 +3452,11 @@ async function onDataLoaded() {
   S.loaded = true;
   S.flags = { cost: m.nc > 0, branch: m.nb > 1, cust: m.ncu > 0, cashier: m.nca > 0, pay: m.np > 0, tax: m.ntax > 0, ret: m.nret > 0, autoCat: m.nauto > m.n * 0.5 };
   S.minDate = m.mn; S.maxDate = m.mx;
-  S.preset = diffDays(m.mn, m.mx) <= 45 ? 'all' : m.mx === monthEnd(m.mx) ? 'mtd' : '30';
-  [S.from, S.to] = presetRange(S.preset);
-  S.branch = ''; S.fam = [[], [], [], [], []];
+  if (!keep) {
+    S.preset = diffDays(m.mn, m.mx) <= 45 ? 'all' : m.mx === monthEnd(m.mx) ? 'mtd' : '30';
+    [S.from, S.to] = presetRange(S.preset);
+    S.branch = ''; S.fam = [[], [], [], [], []];
+  } else if (PRESETS.some(p => p[0] === S.preset)) [S.from, S.to] = presetRange(S.preset);
   S.meta = m; updateStatus();
   await renderFamFilters();
   const br = S.flags.branch ? await q(`SELECT DISTINCT branch b FROM sales WHERE branch IS NOT NULL ORDER BY 1`) : [];
@@ -3664,8 +3679,22 @@ async function restoreSales() {
     await restoreDeleted();
     await S.db.registerFileBuffer('zad_restore.parquet', new Uint8Array(buf));
     const cols = (await q(`DESCRIBE SELECT * FROM read_parquet('zad_restore.parquet')`)).map(r => r.column_name);
+    // ترتيب الأسطر داخل الجدول لا يهم أي تقرير، وعدم الالتزام به يسرّع القراءة كثيراً
+    await q(`SET preserve_insertion_order = false`);
     await q(`INSERT INTO sales SELECT inv, ts, code, name, cat, qty, price, amount, line_cost, branch, cashier, cust, pay, ${cols.includes('tax') ? 'tax' : 'NULL'}, ${cols.includes('usr') ? 'usr' : 'NULL'} FROM read_parquet('zad_restore.parquet')`);
+    await q(`SET preserve_insertion_order = true`);
     await S.db.dropFile('zad_restore.parquet');
+    // ربط الأصناف بالعائلات محفوظ جاهزاً، فلا يُعاد حسابه عند كل فتح
+    try {
+      const fb = await IDB.get('famMap');
+      if (fb) {
+        await S.db.registerFileBuffer('zad_fam_r.parquet', new Uint8Array(fb));
+        await q(`CREATE OR REPLACE TABLE fam_map AS SELECT * FROM read_parquet('zad_fam_r.parquet')`);
+        await S.db.dropFile('zad_fam_r.parquet');
+        FAMOF = new Map((await q(`SELECT code, ANY_VALUE(f1) AS f1, ANY_VALUE(f2) AS f2, ANY_VALUE(f3) AS f3 FROM fam_map GROUP BY code`)).map(r => [r.code, r]));
+        S.famReady = true;
+      }
+    } catch (e) { console.error(e); }
     S.saved = true;
     await onDataLoaded();
     return true;
@@ -3894,6 +3923,9 @@ async function fetchFiles(list) {
   const todo = list.filter(m => !have.has(m.path));
   let done = 0, next = 0;
   const total = todo.reduce((a, m) => a + m.size, 0);
+  // إذا كانت البيانات معروضة أصلاً يتم التحميل في الخلفية دون حجب الشاشة
+  const quiet = S.loaded;
+  const say = t => { if (quiet) $('#status').textContent = t; else { busy(); busy(t); } };
   const worker = async () => {
     while (next < todo.length) {
       const m = todo[next++];
@@ -3901,23 +3933,36 @@ async function fetchFiles(list) {
       if (error) throw error;
       await IDB.set('f:' + m.path, data);
       done += m.size;
-      busy(); busy(`جارٍ تحميل البيانات… ${nf(done / 1048576, 1)} من ${nf(total / 1048576, 1)} MB`);
+      say(`جارٍ تحميل البيانات الجديدة… ${nf(done / 1048576, 1)} من ${nf(total / 1048576, 1)} MB`);
     }
   };
-  if (todo.length) { busy('جارٍ تحميل البيانات…'); try { await Promise.all(Array.from({ length: 6 }, worker)); } finally { busy(); } }
-  const stale = known.filter(p => !want.has(p));
-  for (const p of stale) await IDB.del('f:' + p);
+  if (todo.length) { if (!quiet) busy('جارٍ تحميل البيانات…'); try { await Promise.all(Array.from({ length: 6 }, worker)); } finally { if (!quiet) busy(); } }
+  for (const p of known) if (!want.has(p)) await IDB.del('f:' + p);
   await IDB.set('fileIndex', [...want]);
-  return todo.length + stale.length;
 }
-/** يبني كل الجداول من ملفات هذا المستخدم، بنفس حسابات التحديث من المجلد */
-async function buildFromFiles(list) {
+/** الفرق بين الملفات المبنية والحالية: أي أشهر وأي جداول يلزم تحديثها. المسار: نوع/قسم/اسم.بصمة.csv.gz */
+function diffFiles(oldPaths, list) {
+  const now = new Set(list.map(m => m.path)), old = new Set(oldPaths), ch = { sales: new Set(), voids: new Set(), offday: new Set(), refs: new Set(), master: false, users: false };
+  for (const p of [...oldPaths.filter(x => !now.has(x)), ...[...now].filter(x => !old.has(x))]) {
+    const [ds, , file] = p.split('/'), name = file.split('.')[0];
+    if (ds === 'lines' || ds === 'cost' || ds === 'who') ch.sales.add(name);
+    else if (ds === 'voids') ch.voids.add(name);
+    else if (ds === 'offday' || ds === 'offday_c') ch.offday.add(name);
+    else if (ds === 'items' || ds === 'families') ch.master = true;
+    else if (ds === 'users') ch.users = true;
+    else ch.refs.add(ds);
+  }
+  ch.any = ch.sales.size || ch.voids.size || ch.offday.size || ch.refs.size || ch.master || ch.users;
+  return ch;
+}
+/** يبني الجداول من ملفات هذا المستخدم، بنفس حسابات التحديث من المجلد. ch = الجزء المتغيّر فقط، وبدونه يُبنى كل شيء */
+async function buildFromFiles(list, ch = null) {
   const reg = [];
   let idx = 0;
-  const load = async (ds, nameMatch) => {
+  const load = async (ds, nameMatch, months = null) => {
     const out = [];
     for (const m of list) {
-      if (m.ds !== ds || (nameMatch && !nameMatch.test(m.name))) continue;
+      if (m.ds !== ds || (nameMatch && !nameMatch.test(m.name)) || (months && !months.has(m.name))) continue;
       const fn = `zf_${idx++}.csv`;
       await S.db.registerFileBuffer(fn, await gunzip(await IDB.get('f:' + m.path)));
       reg.push(fn); out.push(lit(fn));
@@ -3925,38 +3970,51 @@ async function buildFromFiles(list) {
     return out;
   };
   const first = (a, b) => list.some(m => m.ds === a) ? a : b;
-  busy('جارٍ تجهيز البيانات… قد يأخذ دقيقة في المرة الأولى');
+  const monthList = set => [...set].map(lit).join(', ');
+  busy(ch ? 'جارٍ تحديث البيانات…' : 'جارٍ تجهيز البيانات… قد يأخذ دقيقة في المرة الأولى');
   try {
     // دليل الأصناف والعائلات
-    const fam = await load('families'), items = await load('items');
-    await q(`CREATE OR REPLACE TABLE sync_fam(fam VARCHAR, name VARCHAR, level INTEGER)`);
-    if (fam.length) await q(`INSERT INTO sync_fam SELECT trim(fam), trim(name), level FROM read_csv([${fam.join(', ')}], header = true, quote = '"', columns = {'fam': 'VARCHAR', 'name': 'VARCHAR', 'level': 'INTEGER'})`);
-    const lv = [1, 2, 3, 4, 5];
-    const rows = items.length ? await q(`SELECT trim(i.code) AS code, NULLIF(trim(i.name), '') AS name, ${lv.map(n => `f${n}.name AS l${n}`).join(', ')}
-      FROM read_csv([${items.join(', ')}], header = true, quote = '"', columns = {'code': 'VARCHAR', 'item_code': 'VARCHAR', 'name': 'VARCHAR', 'fam': 'VARCHAR', 'unit': 'INTEGER', 'price': 'DOUBLE', 'wacost': 'DOUBLE', 'active': 'INTEGER'}) i
-      ${lv.map(n => `LEFT JOIN sync_fam f${n} ON length(trim(i.fam)) >= ${2 * n} AND f${n}.fam = left(trim(i.fam), ${2 * n})`).join(' ')}
-      WHERE NULLIF(trim(i.code), '') IS NOT NULL`) : [];
-    await q(`DROP TABLE sync_fam`);
-    const packed = rows.map(r => [r.code, r.name, r.l1, null, r.l1, r.l2, r.l3, r.l4, r.l5]);
-    await IDB.set('master', packed);
-    await fillMaster(packed);
+    if (!ch || ch.master) {
+      const fam = await load('families'), items = await load('items');
+      const names = new Map(fam.length ? (await q(`SELECT trim(fam) AS fam, trim(name) AS name FROM read_csv([${fam.join(', ')}], header = true, quote = '"', columns = {'fam': 'VARCHAR', 'name': 'VARCHAR', 'level': 'INTEGER'})`)).map(r => [r.fam, r.name]) : []);
+      const rows = items.length ? await q(`SELECT trim(code) AS code, NULLIF(trim(name), '') AS name, trim(fam) AS fam
+        FROM read_csv([${items.join(', ')}], header = true, quote = '"', columns = {'code': 'VARCHAR', 'item_code': 'VARCHAR', 'name': 'VARCHAR', 'fam': 'VARCHAR', 'unit': 'INTEGER', 'price': 'DOUBLE', 'wacost': 'DOUBLE', 'active': 'INTEGER'})
+        WHERE NULLIF(trim(code), '') IS NOT NULL`) : [];
+      // مستويات العائلة من رمزها: كل مستوى رقمان إضافيان
+      const packed = rows.map(r => { const lv = [2, 4, 6, 8, 10].map(n => r.fam && r.fam.length >= n ? names.get(r.fam.slice(0, n)) ?? null : null); return [r.code, r.name, lv[0], null, ...lv]; });
+      await fillMaster(packed);
+      await persistTable('items_master', 'masterPq');
+    }
     // مستخدمو الكاش
-    await q(`DELETE FROM pos_users`);
-    const users = await load('users');
-    if (users.length) await q(`INSERT INTO pos_users SELECT DISTINCT ON ("user") CAST("user" AS VARCHAR), trim(name) FROM read_csv([${users.join(', ')}], header = true, quote = '"', columns = {'user': 'INTEGER', 'name': 'VARCHAR'})`);
-    await IDB.set('posUsers', await q(`SELECT usr, name FROM pos_users`));
-    // الجداول المرجعية
+    if (!ch || ch.users) {
+      await q(`DELETE FROM pos_users`);
+      const users = await load('users');
+      if (users.length) await q(`INSERT INTO pos_users SELECT DISTINCT ON ("user") CAST("user" AS VARCHAR), trim(name) FROM read_csv([${users.join(', ')}], header = true, quote = '"', columns = {'user': 'INTEGER', 'name': 'VARCHAR'})`);
+      await IDB.set('posUsers', await q(`SELECT usr, name FROM pos_users`));
+    }
+    // الجداول المرجعية: يُستبدل الجدول الذي تغيّرت ملفاته فقط
     const refs = { stock: [first('stock_c', 'stock'), /^stock$/], suppliers: ['suppliers'], item_supp: ['item_supp'], purchases: [first('purch_c', 'purch'), /^purchases$/], purch_returns: [first('purch_c', 'purch'), /^purch_returns$/], withdraw_types: ['waste', /^withdraw_types$/], withdrawals: ['waste', /^withdrawals$/], offers: ['offers'] };
     for (const r of REF_TABLES) {
+      const [ds, rx] = refs[r.t];
+      if (ch && !ch.refs.has(ds)) continue;
       await q(`DELETE FROM ${r.t}`);
-      const [ds, rx] = refs[r.t], files = await load(ds, rx);
+      const files = await load(ds, rx);
       if (files.length) await q(`INSERT INTO ${r.t} SELECT * FROM read_csv([${files.join(', ')}], header = true, quote = '"', columns = ${csvCols(r.cols)})`);
     }
-    await q(`UPDATE stock SET last_rec = CASE WHEN last_rec < DATE '2000-01-01' THEN NULL ELSE last_rec END, last_purch = CASE WHEN last_purch < DATE '2000-01-01' THEN NULL ELSE last_purch END, last_sale = CASE WHEN last_sale < DATE '2000-01-01' THEN NULL ELSE last_sale END`);
-    S.stockAt = S.syncAt || null;
-    // أسطر البيع: الملف الأساسي، والكلفة والكاشير من ملفات منفصلة حسب الصلاحية
-    await q(`DELETE FROM sales`); await q(`DELETE FROM deleted`); await q(`DELETE FROM offday`);
-    const base = await load('lines'), cost = await load('cost'), who = await load('who');
+    if (!ch || ch.refs.has(first('stock_c', 'stock'))) {
+      await q(`UPDATE stock SET last_rec = CASE WHEN last_rec < DATE '2000-01-01' THEN NULL ELSE last_rec END, last_purch = CASE WHEN last_purch < DATE '2000-01-01' THEN NULL ELSE last_purch END, last_sale = CASE WHEN last_sale < DATE '2000-01-01' THEN NULL ELSE last_sale END`);
+      S.stockAt = S.syncAt || null;
+    }
+    // أسطر البيع: الملف الأساسي، والكلفة والكاشير من ملفات منفصلة حسب الصلاحية. عند التحديث يُستبدل الشهر المتغيّر فقط
+    const mSales = ch ? ch.sales : null, mVoids = ch ? ch.voids : null, mOff = ch ? ch.offday : null;
+    if (!ch) { await q(`DELETE FROM sales`); await q(`DELETE FROM deleted`); await q(`DELETE FROM offday`); }
+    else {
+      if (mSales.size) await q(`DELETE FROM sales WHERE strftime(ts, '%Y-%m') IN (${monthList(mSales)})`);
+      if (mVoids.size) await q(`DELETE FROM deleted WHERE strftime(ts, '%Y-%m') IN (${monthList(mVoids)})`);
+      if (mOff.size) await q(`DELETE FROM offday WHERE strftime(date, '%Y-%m') IN (${monthList(mOff)})`);
+    }
+    const skipSales = ch && !mSales.size;
+    const base = skipSales ? [] : await load('lines', null, mSales), cost = skipSales ? [] : await load('cost', null, mSales), who = skipSales ? [] : await load('who', null, mSales);
     const br = `CASE r.store ${Object.entries(SYNC_BRANCH).map(([k, v]) => `WHEN ${k} THEN ${lit(v)}`).join(' ')} ELSE 'فرع ' || r.store END`;
     const names = `(SELECT code, ANY_VALUE(name) AS name FROM items_master WHERE code IS NOT NULL AND name IS NOT NULL GROUP BY code)`;
     const s = e => `CASE WHEN r.k = 'R' THEN -ABS(${e}) ELSE ${e} END`;
@@ -3969,21 +4027,26 @@ async function buildFromFiles(list) {
       ${cost.length ? `LEFT JOIN read_csv([${cost.join(', ')}], header = true, columns = {'rid': 'BIGINT', 'cost': 'DOUBLE'}) c ON c.rid = r.rid` : ''}
       ${who.length ? `LEFT JOIN read_csv([${who.join(', ')}], header = true, quote = '"', columns = {'rid': 'BIGINT', 'pos': 'VARCHAR', 'user': 'INTEGER', 'cust': 'BIGINT'}) w ON w.rid = r.rid` : ''}
       LEFT JOIN ${names} m ON m.code = trim(r.code)`);
-    const dl = await load('voids');
+    const dl = ch && !mVoids.size ? [] : await load('voids', null, mVoids);
     if (dl.length) await q(`INSERT INTO deleted
       SELECT CAST(r.ts AS DATE) + COALESCE(TRY_CAST(substr(r.added, 12, 8) AS TIME), CAST(r.ts AS TIME)), trim(r.code), COALESCE(m.name, trim(r.code)),
         r.qty, r.price, NULLIF(CAST(r."user" AS VARCHAR), '0'), NULLIF(CAST(r.auth AS VARCHAR), '0'), r.source, r.cashno,
         COALESCE(NULLIF(r.pos, ''), 'جهاز ' || r.posno), ${br}
       FROM read_csv([${dl.join(', ')}], header = true, quote = '"', columns = ${SYNC_COLS.deleted}) r
       LEFT JOIN ${names} m ON m.code = trim(r.code)`);
-    const ol = await load(first('offday_c', 'offday'));
+    const ol = ch && !mOff.size ? [] : await load(first('offday_c', 'offday'), null, mOff);
     if (ol.length) await q(`INSERT INTO offday SELECT * FROM read_csv([${ol.join(', ')}], header = true, quote = '"', columns = ${csvCols(OFFDAY_COLS)})`);
-    await q(`UPDATE sales SET cat = ${catSQL('name')} WHERE cat = 'غير مصنف'`);
+    // القسم التقديري: يُحسب مرة لكل اسم صنف وليس لكل سطر (أسرع بكثير مع ملايين الأسطر)
+    await q(`CREATE OR REPLACE TEMP TABLE cat_map AS SELECT name AS n, ${catSQL('name')} AS c FROM (SELECT DISTINCT name FROM sales WHERE cat = 'غير مصنف')`);
+    await q(`UPDATE sales SET cat = cat_map.c FROM cat_map WHERE sales.cat = 'غير مصنف' AND sales.name = cat_map.n`);
+    await q(`DROP TABLE cat_map`);
     await applyMaster();
     S.isDemo = false;
+    S.keepView = !!ch;   // التحديث في الخلفية لا يغيّر الفترة والفلاتر التي يعمل عليها المستخدم
     await onDataLoaded();
     await persistSales();
-    await persistDeleted();
+    if (!ch || ch.refs.size || mVoids.size || mOff.size) await persistDeleted();
+    await persistTable('fam_map', 'famMap').catch(e => console.error(e));
     await IDB.set('builtFrom', list.map(m => m.path).join('\n'));
   } finally {
     for (const fn of reg) try { await S.db.dropFile(fn); } catch {}
@@ -3996,10 +4059,14 @@ async function refreshData(interactive) {
   S.syncAt = status?.pushed_at;
   const list = await fetchManifest();
   if (!list.some(m => m.ds === 'lines')) { $('#status').textContent = 'لا توجد بيانات متاحة لحسابك بعد. تواصل مع الإدارة.'; return; }
-  const changed = await fetchFiles(list);
-  const same = (await IDB.get('builtFrom')) === list.map(m => m.path).join('\n');
-  if (changed || !same || !S.loaded) await buildFromFiles(list);
-  else { updateStatus(); if (interactive) toast('البيانات محدّثة، لا يوجد جديد.', 'ok'); return; }
+  await fetchFiles(list);
+  const built = await IDB.get('builtFrom');
+  if (!S.loaded || !built) await buildFromFiles(list);
+  else {
+    const ch = diffFiles(built.split('\n'), list);
+    if (!ch.any) { updateStatus(); if (interactive) toast('البيانات محدّثة، لا يوجد جديد.', 'ok'); return; }
+    await buildFromFiles(list, ch);
+  }
   updateStatus();
   if (interactive) toast('تم تحديث البيانات.', 'ok');
 }
@@ -4073,7 +4140,17 @@ async function startApp(user) {
   // فتح سريع مما حُفظ على هذا الجهاز، ثم جلب ما تغيّر
   let built = null; try { built = await IDB.get('builtFrom'); } catch {}
   if (built) await restoreSales();
-  await refreshData(false);
+  try { await refreshData(false); }
+  catch (e) {
+    // البيانات المحفوظة تبقى معروضة إذا تعذر جلب الجديد
+    if (!S.loaded) throw e;
+    console.error(e); updateStatus(); toast('تعذر جلب آخر البيانات، والمعروض هو آخر نسخة محفوظة. اضغط «تحديث البيانات» للمحاولة مجدداً.');
+  }
+  // المتصفحات التي حفظت نسخة أقدم: تُجهَّز النسخ الجاهزة مرة واحدة لتسريع الفتح التالي
+  if (S.loaded) try {
+    if (!(await IDB.get('masterPq'))) await persistTable('items_master', 'masterPq');
+    if (!(await IDB.get('famMap'))) await persistTable('fam_map', 'famMap');
+  } catch (e) { console.error(e); }
 }
 $('#loginForm').addEventListener('submit', async e => {
   e.preventDefault();
