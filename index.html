@@ -153,6 +153,9 @@ td.wrap{white-space:normal;min-width:160px}
 .tg-bar b{position:absolute;inset-block:0;width:2px;background:var(--text);opacity:.55}
 .tg-lv{font-weight:600}.tg-lv.l0{color:var(--bad)}.tg-lv.l1{color:var(--s4)}.tg-lv.l2,.tg-lv.l3{color:var(--good)}
 td.tg-hit{background:var(--good-bg)} td.tg-miss{background:var(--bad-bg)}
+/* تواريخ الصلاحية */
+.ex-st{display:flex;gap:4px;align-items:center}.ex-st select,.ex-st input{min-height:30px;padding:3px 6px}.ex-st input{width:120px}
+tr.ex-late td{background:var(--bad-bg)}
 .welcome{max-width:880px;margin:30px auto;display:flex;flex-direction:column;gap:16px}
 .welcome h2{font-size:22px}
 .welcome .big{display:flex;gap:10px;flex-wrap:wrap}
@@ -301,6 +304,7 @@ tbody tr.drill td:first-child::after{content:" ‹";color:var(--muted)}
     <button data-tab="alerts">التنبيهات</button>
     <button data-tab="cats">الأقسام</button>
     <button data-tab="targets">الأهداف</button>
+    <button data-tab="expiry">تواريخ الصلاحية</button>
     <button data-tab="floors">الطوابق والكاش</button>
     <button data-tab="customers">سلوك الزبائن</button>
     <button data-tab="basket">سلة المشتريات</button>
@@ -605,6 +609,37 @@ tbody tr.drill td:first-child::after{content:" ‹";color:var(--muted)}
         <div class="tbl-wrap"><table id="tblTgDay"></table></div></div>
     </section>
 
+    <!-- تواريخ الصلاحية من Zad Staff -->
+    <section class="panel" data-panel="expiry" hidden>
+      <div class="card" id="exLogin" hidden>
+        <h3>تواريخ الصلاحية · الدخول بحساب Zad Staff</h3>
+        <p class="hint" style="margin-bottom:10px">الموظفون يدخلون التواريخ من تطبيق Zad Staff. للمتابعة هنا سجّل الدخول بحساب Zad Staff له صلاحية المتابعة (HR، مدير الفرع، أو قسم مفعّل عليه «متابعة تواريخ الصلاحية»).</p>
+        <form id="exLoginForm" class="opts">
+          <label>البريد أو الهاتف <input id="exUser" autocomplete="username" required style="direction:ltr"></label>
+          <label>كلمة السر <input type="password" id="exPass" autocomplete="current-password" required style="direction:ltr"></label>
+          <button class="btn primary">دخول</button>
+          <span class="hint" id="exLoginMsg" style="color:var(--bad)"></span>
+        </form>
+      </div>
+      <div id="exBody" hidden style="display:flex;flex-direction:column;gap:14px">
+        <div class="card"><div class="card-h"><h3>المنتجات قريبة الانتهاء</h3>
+          <span class="hint">حساب Zad Staff: <b id="exWho"></b> · <button type="button" class="btn" id="exReload">⟳ تحديث</button> <button type="button" class="btn" id="exLogout">خروج من Zad Staff</button></span></div>
+          <p class="hint"><b>بيع يومي</b> = متوسط بيع الصنف في آخر 28 يوماً. <b>سيُباع قبله</b> = ما يُتوقع بيعه من هذه الكمية قبل تاريخ الانتهاء (الدفعة الأقرب انتهاءً تُباع أولاً). <b>المهدد</b> = ما سيبقى عند الانتهاء إن استمر البيع بنفس المعدل. الحسابات للأسطر «بانتظار المعالجة» فقط.</p>
+          <p class="hint" id="exMsg" style="color:var(--bad)"></p></div>
+        <div class="kpis" id="exKpis"></div>
+        <div class="card">
+          <div class="of-bar">
+            <div class="seg" id="exWin"><button data-v="exp">منتهي</button><button data-v="7">7 أيام</button><button data-v="14">14 يوماً</button><button data-v="30" class="on">30 يوماً</button><button data-v="60">60 يوماً</button><button data-v="all">الكل</button></div>
+            <div class="seg" id="exStatus"><button data-v="pending" class="on">بانتظار المعالجة</button><button data-v="all">كل الحالات</button></div>
+            <select id="exDept"></select>
+            <input type="search" id="exQ" placeholder="بحث بالاسم أو الباركود">
+            <span class="hint" id="exCount"></span>
+          </div>
+          <div class="tbl-wrap"><table id="tblExpiry"></table></div>
+        </div>
+      </div>
+    </section>
+
     <!-- الأصناف الممسوحة عن الكاش -->
     <section class="panel" data-panel="voids" hidden>
       <p class="hint" style="margin:0 0 12px">أصناف أُدخلت على الكاش ثم مُسحت قبل الدفع (من قاعدة Solid Soft). القيمة بسعر البيع. أغلب المسح طبيعي (تصحيح، زبون غيّر رأيه)، والمهم هو <b>النمط</b>: كاشير نسبته أعلى بوضوح من زملائه، مسح بدون موافقة مشرف، أو أصناف تُمسح ولا تعود للفاتورة.</p>
@@ -776,7 +811,7 @@ const S = {
   from: null, to: null, cmp: 'prev', branch: '', fam: [[], [], [], [], []], hasFam: false, catLevel: 1, tab: 'overview', dirty: new Set(),
   cur: store.get('zad.cur', 'د.أ'), net: true, cutoff: +store.get('zad.cutoff', '4'), gran: 'month', itMetric: 'sales', mov: 'up', pairOrder: 'lift', preset: '30',
 };
-const TABS = ['overview', 'time', 'items', 'alerts', 'cats', 'targets', 'floors', 'customers', 'basket', 'ops', 'supp', 'order', 'offers', 'voids'];
+const TABS = ['overview', 'time', 'items', 'alerts', 'cats', 'targets', 'expiry', 'floors', 'customers', 'basket', 'ops', 'supp', 'order', 'offers', 'voids'];
 
 /* ============ واجهة الانتظار والأخطاء ============ */
 let busyN = 0;
@@ -1034,7 +1069,7 @@ $('#tabs').addEventListener('click', async e => {
 });
 async function renderTab(t) {
   $$('.panel[data-panel]').forEach(p => p.hidden = p.dataset.panel !== t);
-  const fn = { overview: renderOverview, time: renderTime, items: renderItems, alerts: renderAlerts, cats: renderCats, targets: renderTargets, floors: renderFloors, customers: renderCustomers, basket: renderBasket, ops: renderOps, supp: renderSupp, order: renderOrder, offers: renderOffers, voids: renderVoids }[t];
+  const fn = { overview: renderOverview, time: renderTime, items: renderItems, alerts: renderAlerts, cats: renderCats, targets: renderTargets, expiry: renderExpiry, floors: renderFloors, customers: renderCustomers, basket: renderBasket, ops: renderOps, supp: renderSupp, order: renderOrder, offers: renderOffers, voids: renderVoids }[t];
   await fn();
   S.dirty.delete(t);
 }
@@ -1584,6 +1619,125 @@ function drawTgChart() {
 }
 $('#tgMonth').addEventListener('change', async e => { S.tgMonth = e.target.value; busy('جارٍ حساب الأهداف…'); try { await renderTargets(); } finally { busy(); } });
 $('#tgDept').addEventListener('change', e => { S.tgDept = e.target.value; drawTgChart(); });
+
+/* ============ تواريخ الصلاحية (من تطبيق Zad Staff) ============
+   الموظفون يدخلون تاريخ الانتهاء والكمية من Zad Staff بمسح الباركود، وهنا المتابعة وتغيير الحالة.
+   الدخول بحساب Zad Staff: HR أو مدير الفرع أو موظف في قسم مفعّل عليه «متابعة تواريخ الصلاحية».
+   «سيُباع قبل الانتهاء» من بيع الصنف اليومي في آخر 28 يوماً، والتواريخ الأقرب تُباع أولاً. */
+const STAFF_URL = 'https://njtoxosnabpfbwrqvoxv.supabase.co';
+const STAFF_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5qdG94b3NuYWJwZmJ3cnF2b3h2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk4MjIzMDksImV4cCI6MjEwNTM5ODMwOX0.Zih5Cjszh94-Cp8_oDylqfttahScG2lwC9odJVMXUEE';
+let staffClient = null;
+const staffSb = () => staffClient || (staffClient = window.supabase.createClient(STAFF_URL, STAFF_KEY, { auth: { persistSession: true, storageKey: 'zad-staff-expiry' } }));
+const EXP_STATUS = { pending: 'بانتظار المعالجة', discounted: 'تم تخفيضه', returned: 'أُرجع للمورد', damaged: 'تم إتلافه', sold: 'بِيع', moved: 'نُقل للواجهة', checked: 'تم التحقق' };
+const EXP = { win: '30', status: 'pending', dept: '', text: '', rows: [] };
+async function renderExpiry() {
+  const sbx = staffSb();
+  const { data: { session } } = await sbx.auth.getSession();
+  $('#exLogin').hidden = !!session; $('#exBody').hidden = !session;
+  if (!session) return;
+  $('#exWho').textContent = session.user.email;
+  const { data, error } = await sbx.from('expiry_items').select('*').order('expiry_date').limit(10000);
+  if (error) { $('#exMsg').textContent = 'تعذر قراءة التواريخ من Zad Staff: ' + error.message; EXP.rows = []; drawExpiry(); return; }
+  $('#exMsg').textContent = data.length ? '' : 'لا توجد تواريخ مُدخلة بعد، أو أن حسابك لا يملك صلاحية متابعتها (يفعّلها HR من «إدارة الأقسام» في Zad Staff).';
+  // ربط الباركود بالصنف في المبيعات (بعض القارئات تحذف الصفر الأول أو تضيفه)
+  const variants = c => [...new Set([c, c.replace(/^0+/, ''), '0' + c])];
+  const all = [...new Set(data.flatMap(r => variants(String(r.barcode).trim())))];
+  const info = new Map();
+  if (all.length) {
+    const codes = all.map(lit).join(', '), mx = S.maxDate;
+    for (const r of await q(`SELECT code, ANY_VALUE(name) AS name, ANY_VALUE(f1) AS f1,
+        COALESCE(SUM(qty) FILTER (WHERE d > DATE '${mx}' - INTERVAL 28 DAY), 0)::DOUBLE / 28 AS rate,
+        (SUM(line_cost) FILTER (WHERE d > DATE '${mx}' - INTERVAL 90 DAY AND qty > 0 AND line_cost IS NOT NULL) / NULLIF(SUM(qty) FILTER (WHERE d > DATE '${mx}' - INTERVAL 90 DAY AND qty > 0 AND line_cost IS NOT NULL), 0))::DOUBLE AS ucost
+        FROM sv WHERE code IN (${codes}) GROUP BY code`)) info.set(r.code, r);
+    for (const r of await q(`SELECT code, ANY_VALUE(name) AS name, ANY_VALUE(l1) AS f1 FROM items_master WHERE code IN (${codes}) GROUP BY code`))
+      if (!info.has(r.code)) info.set(r.code, { ...r, rate: 0, ucost: null });
+  }
+  // في الرابط المشترك: من ليس مديراً عاماً يرى أصناف أقسامه فقط
+  const limited = typeof PERM !== 'undefined' && PERM.profile && !PERM.profile.is_admin;
+  const today = localToday();
+  EXP.rows = data.map(r => {
+    const code = variants(String(r.barcode).trim()).find(c => info.has(c));
+    const it = code ? info.get(code) : null;
+    return { ...r, code: code || r.barcode, name: r.item_name || it?.name || 'صنف غير معروف', f1: it?.f1 || null, rate: it?.rate || 0, ucost: it?.ucost ?? null, known: !!it,
+      days: diffDays(today, r.expiry_date) };
+  }).filter(r => !limited || r.known);
+  // البيع المتوقع قبل الانتهاء لكل دفعة: الأقرب انتهاءً تُباع أولاً
+  const used = new Map();
+  for (const r of EXP.rows.filter(x => x.status === 'pending').sort((a, b) => a.expiry_date < b.expiry_date ? -1 : 1)) {
+    const u = used.get(r.code) || 0, cap = Math.max(0, r.rate * Math.max(0, r.days) - u);
+    r.willSell = Math.min(+r.qty, cap); r.risk = +r.qty - r.willSell; used.set(r.code, u + r.willSell);
+    r.riskVal = r.ucost != null ? r.risk * r.ucost : null;
+  }
+  const depts = [...new Set(EXP.rows.map(r => r.f1).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ar'));
+  if (!depts.includes(EXP.dept)) EXP.dept = '';
+  $('#exDept').innerHTML = '<option value="">كل الأقسام</option>' + depts.map(d => `<option${d === EXP.dept ? ' selected' : ''}>${esc(d)}</option>`).join('');
+  drawExpiry();
+}
+function drawExpiry() {
+  const showVal = S.flags.cost && !S.noProfit;
+  const open = EXP.rows.filter(r => r.status === 'pending');
+  const sum = (a, k) => a.reduce((s, r) => s + (+r[k] || 0), 0);
+  const exp = open.filter(r => r.days < 0), d7 = open.filter(r => r.days >= 0 && r.days <= 7), d30 = open.filter(r => r.days >= 0 && r.days <= 30);
+  $('#exKpis').innerHTML = [
+    { l: 'منتهية ولم تُعالج', v: nf(exp.length), p: `الكمية ${nf(sum(exp, 'qty'), 1)}`, bad: exp.length },
+    { l: 'تنتهي خلال 7 أيام', v: nf(d7.length), p: `الكمية ${nf(sum(d7, 'qty'), 1)}`, bad: d7.length },
+    { l: 'تنتهي خلال 30 يوماً', v: nf(d30.length), p: `الكمية ${nf(sum(d30, 'qty'), 1)}` },
+    { l: 'كمية لن تُباع قبل انتهائها', v: nf(sum(open, 'risk'), 0), p: 'حسب بيع آخر 28 يوماً' },
+    ...(showVal ? [{ l: 'قيمة المهدد بالكلفة', v: F.money(sum(open, 'riskVal')), p: 'الكمية المهددة × متوسط كلفة الصنف', bad: sum(open, 'riskVal') > 0 }] : []),
+  ].map(k => `<div class="kpi"><div class="l">${k.l}</div><div class="v"${k.bad ? ' style="color:var(--bad)"' : ''}>${k.v}</div><div class="p">${k.p}</div></div>`).join('');
+  const t = EXP.text.trim().toLowerCase();
+  const rows = EXP.rows.filter(r => (EXP.status === 'all' || r.status === EXP.status)
+    && (EXP.win === 'all' || (EXP.win === 'exp' ? r.days < 0 : r.days <= +EXP.win))
+    && (!EXP.dept || r.f1 === EXP.dept)
+    && (!t || r.name.toLowerCase().includes(t) || String(r.barcode).includes(t)));
+  const dayTxt = n => n < 0 ? `<span class="d bad">منتهي من ${-n} يوم</span>` : n === 0 ? '<span class="d bad">اليوم</span>' : `<span class="d ${n <= 7 ? 'bad' : 'flat'}">${n} يوم</span>`;
+  const when = s => s ? new Date(s).toLocaleString('en-GB', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
+  $('#exCount').textContent = `${nf(rows.length)} سطر`;
+  $('#tblExpiry').innerHTML = `<thead><tr><th>الصنف</th><th>القسم</th><th>ينتهي</th><th>الباقي</th><th class="num">الكمية</th><th class="num">بيع يومي</th><th class="num">سيُباع قبله</th><th class="num">المهدد</th>${showVal ? '<th class="num">قيمة المهدد</th>' : ''}<th>أدخله</th><th>الحالة</th></tr></thead>
+    <tbody>${rows.map(r => `<tr data-id="${r.id}"${r.status === 'pending' && r.days < 0 ? ' class="ex-late"' : ''}>
+      <td class="wrap">${esc(r.name)}<div class="hint">${esc(r.barcode)}${r.known ? '' : ' · غير موجود في بيانات المبيعات'}${r.note ? ' · ' + esc(r.note) : ''}</div></td>
+      <td>${esc(r.f1 || '—')}</td><td>${esc(r.expiry_date)}</td><td>${dayTxt(r.days)}</td>
+      <td class="num">${nf(r.qty, r.qty % 1 ? 1 : 0)}</td><td class="num">${r.rate ? nf(r.rate, 1) : '—'}</td>
+      <td class="num">${r.status === 'pending' ? nf(r.willSell, 0) : '—'}</td>
+      <td class="num">${r.status === 'pending' ? (r.risk > 0 ? `<b style="color:var(--bad)">${nf(r.risk, 0)}</b>` : '0') : '—'}</td>
+      ${showVal ? `<td class="num">${r.status === 'pending' && r.riskVal ? F.money(r.riskVal) : '—'}</td>` : ''}
+      <td>${esc(r.created_by_name || '—')}<div class="hint">${when(r.created_at)}</div></td>
+      <td><div class="ex-st"><select class="exSt">${Object.entries(EXP_STATUS).map(([k, v]) => `<option value="${k}"${k === r.status ? ' selected' : ''}>${v}</option>`).join('')}</select>
+        <input class="exNote" placeholder="ملاحظة" value="${esc(r.status_note || '')}"><button class="btn exSave" type="button">حفظ</button></div>
+        ${r.status_by_name ? `<div class="hint">${esc(r.status_by_name)} · ${when(r.status_at)}</div>` : ''}</td></tr>`).join('')
+      || `<tr><td colspan="${showVal ? 11 : 10}" class="hint">لا توجد أسطر تطابق الفلاتر</td></tr>`}</tbody>`;
+}
+$('#exWin').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; EXP.win = b.dataset.v; $$('#exWin button').forEach(x => x.classList.toggle('on', x === b)); drawExpiry(); });
+$('#exStatus').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; EXP.status = b.dataset.v; $$('#exStatus button').forEach(x => x.classList.toggle('on', x === b)); drawExpiry(); });
+$('#exDept').addEventListener('change', e => { EXP.dept = e.target.value; drawExpiry(); });
+$('#exQ').addEventListener('input', e => { EXP.text = e.target.value; drawExpiry(); });
+$('#exReload').addEventListener('click', () => { busy('جارٍ تحديث التواريخ…'); renderExpiry().finally(() => busy()); });
+$('#tblExpiry').addEventListener('click', async e => {
+  const b = e.target.closest('.exSave'); if (!b) return;
+  const tr = b.closest('tr'), id = +tr.dataset.id, status = tr.querySelector('.exSt').value, note = tr.querySelector('.exNote').value.trim() || null;
+  b.disabled = true;
+  const { error } = await staffSb().from('expiry_items').update({ status, status_note: note }).eq('id', id);
+  b.disabled = false;
+  if (error) { toast('تعذر الحفظ: ' + error.message); return; }
+  toast('تم الحفظ', 'ok');
+  busy('…'); renderExpiry().finally(() => busy());
+});
+$('#exLoginForm').addEventListener('submit', async e => {
+  e.preventDefault();
+  const sbx = staffSb(), id = $('#exUser').value.trim(); let email = id;
+  $('#exLoginMsg').textContent = '';
+  // مثل Zad Staff: يقبل الإيميل أو رقم الهاتف
+  if (!id.includes('@')) {
+    const { data, error } = await sbx.rpc('get_login_email', { p_phone: id });
+    if (error || !data) { $('#exLoginMsg').textContent = 'لا يوجد حساب Zad Staff بهذا الرقم.'; return; }
+    email = data;
+  }
+  const { error } = await sbx.auth.signInWithPassword({ email, password: $('#exPass').value });
+  if (error) { $('#exLoginMsg').textContent = 'البريد أو الهاتف أو كلمة السر غير صحيحة.'; return; }
+  $('#exPass').value = '';
+  busy('…'); renderExpiry().finally(() => busy());
+});
+$('#exLogout').addEventListener('click', async () => { await staffSb().auth.signOut(); renderExpiry(); });
 
 async function renderCats() {
   const L = catGroupLevel(), G = famLevelExpr(L), LN = levelName(L);
