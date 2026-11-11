@@ -593,14 +593,15 @@ tbody tr.drill td:first-child::after{content:" ‹";color:var(--muted)}
 
     <!-- أهداف الأقسام الشهرية -->
     <section class="panel" data-panel="targets" hidden>
-      <div class="card"><div class="card-h"><h3>أهداف الأقسام الشهرية</h3>
-        <label class="hint" style="display:flex;gap:6px;align-items:center">الشهر <select id="tgMonth"></select></label></div>
+      <div class="card"><div class="card-h"><h3>أهداف الأقسام</h3>
+        <span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap"><label class="hint" style="display:flex;gap:6px;align-items:center">الفترة <select id="tgMonth"></select></label><span id="tgPeriodBar" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap"></span></span></div>
         <p class="hint">لكل قسم ثلاثة مستويات، كلها من أداء القسم نفسه في آخر شهرين (المبيعات <b>شاملة الضريبة</b> بعد خصم المردودات، ولا تتأثر بفلتر التاريخ ولا باختيار «المبالغ» أعلاه):
           <b>المستوى 1</b> = معدل بيعه اليومي في الشهر السابق × أيام الشهر (المحافظة على المستوى).
           <b>المستوى 3</b> = العودة لمعدل الشهر الذي قبله، على ألا تقل الزيادة عن 6% ولا تزيد عن 15%.
           <b>المستوى 2 (الهدف)</b> = منتصف المسافة بينهما. الأقسام التي حصتها أقل من 3% تُجمع تحت «باقي الأقسام».
           <b>المتوقع لآخر الشهر</b> = معدل الأيام المكتملة × أيام الشهر (اليوم الجاري لا يدخل حتى يكتمل).
-          الإدارة تقدر تحدد أهداف أي قسم يدوياً، ويظهر جنب القسم <span class="tg-man">يدوي</span>.</p></div>
+          الإدارة تقدر تحدد أهداف أي قسم يدوياً، ويظهر جنب القسم <span class="tg-man">يدوي</span>،
+          وتقدر تضيف <b>فترة مخصصة</b> (من تاريخ إلى تاريخ) بدل الشهر؛ أساسها التلقائي فترتان بنفس الطول قبلها مباشرة.</p></div>
       <div class="kpis" id="tgKpis"></div>
       <div class="card"><div class="card-h"><h3>تقدّم الأقسام</h3><span id="tgEditBar" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap"></span></div>
         <p class="hint" style="margin-bottom:8px">الشريط يبيّن المتوقع لآخر الشهر، والخطوط عليه هي المستويات 1 و2 و3. <b>الهامش</b> (قبل الضريبة) يقارن هامش الربح هذا الشهر بالشهر السابق: إذا نزل أكثر من نقطة تظهر ⚠، لأن رفع البيع بالخصومات على حساب الربح لا يُحتسب.</p>
@@ -1505,41 +1506,55 @@ const TG_LV = ['دون المستوى 1', 'المستوى 1', 'المستوى 2'
 const monthLbl = m => `${AR_MONTHS[+m.slice(5, 7) - 1]} ${m.slice(0, 4)}`;
 const nextMonth = m => addDays(monthEnd(m), 1);
 let TG = null;
+const dLbl = d => `${+d.slice(8)}/${+d.slice(5, 7)}/${d.slice(0, 4)}`;
 async function renderTargets() {
-  // الأشهر الممكنة: من الشهر الذي بعد أول شهر في البيانات حتى الشهر الذي بعد آخر يوم فيها
+  if (!TGS.ready) await tgInit();
+  // الفترات: الفترات المخصصة (من تاريخ إلى تاريخ) أولاً، ثم الأشهر من الشهر الذي بعد أول شهر في البيانات حتى الشهر الذي بعد آخر يوم فيها
   const months = [];
   for (let m = nextMonth(S.minDate), last = nextMonth(S.maxDate); m <= last; m = nextMonth(m)) months.unshift(m);
-  if (!months.includes(S.tgMonth)) S.tgMonth = months.includes(monthStart(S.maxDate)) ? monthStart(S.maxDate) : months[0];
-  $('#tgMonth').innerHTML = months.map(m => `<option value="${m}"${m === S.tgMonth ? ' selected' : ''}>${monthLbl(m)}</option>`).join('');
-  const M = S.tgMonth, end = monthEnd(M), nDays = diffDays(M, end) + 1;
-  const p1 = monthStart(addDays(M, -1)), p2 = monthStart(addDays(p1, -1));
+  const periods = TGS.periods || [];
+  const keys = [...periods.map(p => 'p:' + p.id), ...months];
+  if (!keys.includes(S.tgMonth)) S.tgMonth = months.includes(monthStart(S.maxDate)) ? monthStart(S.maxDate) : months[0];
+  $('#tgMonth').innerHTML = (periods.length ? `<optgroup label="فترات مخصصة">${periods.map(p => `<option value="p:${esc(p.id)}"${'p:' + p.id === S.tgMonth ? ' selected' : ''}>${esc(p.name)} (${dLbl(p.from)} – ${dLbl(p.to)})</option>`).join('')}</optgroup><optgroup label="الأشهر">` : '')
+    + months.map(m => `<option value="${m}"${m === S.tgMonth ? ' selected' : ''}>${monthLbl(m)}</option>`).join('') + (periods.length ? '</optgroup>' : '');
+  const per = S.tgMonth.startsWith('p:') ? periods.find(p => 'p:' + p.id === S.tgMonth) : null;
+  const P = per ? { key: S.tgMonth, id: per.id, custom: true, from: per.from, to: per.to, label: `${per.name} (${dLbl(per.from)} – ${dLbl(per.to)})` }
+    : { key: S.tgMonth, custom: false, from: S.tgMonth, to: monthEnd(S.tgMonth), label: monthLbl(S.tgMonth) };
+  tgPeriodBar(P);
+  const M = P.from, end = P.to, nDays = diffDays(M, end) + 1;
+  // الأساس: للشهر = الشهران السابقان؛ للفترة المخصصة = فترتان بنفس الطول قبلها مباشرة
+  const w1 = P.custom ? [addDays(M, -nDays), addDays(M, -1)] : [monthStart(addDays(M, -1)), addDays(M, -1)];
+  const w2 = P.custom ? [addDays(M, -2 * nDays), addDays(M, -nDays - 1)] : [monthStart(addDays(w1[0], -1)), addDays(w1[0], -1)];
   // الأيام المكتملة فقط: اليوم الجاري لا يدخل في المعدل حتى ينتهي
   const today = localToday(), doneEnd = minS(end, S.maxDate >= today ? addDays(today, -1) : S.maxDate);
   const elapsed = doneEnd >= M ? diffDays(M, doneEnd) + 1 : 0;
   // المبيعات والأهداف شاملة الضريبة (أسهل للمقارنة مع تقارير النظام)، والهامش قبل الضريبة لأن الكلفة بدونها
-  const A = NETAMT(), mk = `strftime(date_trunc('month', d), '%Y-%m-%d')`;
+  const A = NETAMT(), inW = w => `d BETWEEN DATE '${w[0]}' AND DATE '${w[1]}'`;
+  const mk = `CASE WHEN ${inW(w2)} THEN 'p2' WHEN ${inW(w1)} THEN 'p1' ELSE 'cur' END`;
   const agg = await q(`SELECT f1, ${mk} m, SUM(amt_incl)::DOUBLE s, SUM(CASE WHEN line_cost IS NOT NULL THEN ${A} - line_cost END)::DOUBLE pr, SUM(CASE WHEN line_cost IS NOT NULL THEN ${A} END)::DOUBLE sc
-    FROM sv WHERE d BETWEEN DATE '${p2}' AND DATE '${end}' GROUP BY 1, 2`);
-  const mdays = Object.fromEntries((await q(`SELECT ${mk} m, COUNT(DISTINCT d)::INTEGER n FROM sv WHERE d BETWEEN DATE '${p2}' AND DATE '${monthEnd(p1)}' GROUP BY 1`)).map(r => [r.m, r.n]));
+    FROM sv WHERE ${inW(w2)} OR ${inW(w1)} OR ${inW([M, end])} GROUP BY 1, 2`);
+  const mdays = Object.fromEntries((await q(`SELECT ${mk} m, COUNT(DISTINCT d)::INTEGER n FROM sv WHERE ${inW(w2)} OR ${inW(w1)} GROUP BY 1`)).map(r => [r.m, r.n]));
   const daily = await q(`SELECT f1, strftime(d, '%Y-%m-%d') d, SUM(amt_incl)::DOUBLE s FROM sv WHERE d BETWEEN DATE '${M}' AND DATE '${end}' GROUP BY 1, 2`);
-  const n1 = mdays[p1], n2 = mdays[p2];
+  const n1 = mdays.p1, n2 = mdays.p2;
   if (!n1) {
     TG = null;
-    $('#tgKpis').innerHTML = `<div class="kpi"><div class="l">لا يمكن حساب الأهداف</div><div class="p">لا توجد بيانات لشهر ${monthLbl(p1)}، والأهداف تُبنى على أداء الشهر السابق.</div></div>`;
+    $('#tgKpis').innerHTML = `<div class="kpi"><div class="l">لا يمكن حساب الأهداف</div><div class="p">لا توجد بيانات للفترة ${dLbl(w1[0])} – ${dLbl(w1[1])}، والأهداف تُبنى على أداء الفترة السابقة.</div></div>`;
     $('#tblTg').innerHTML = $('#tblTgDay').innerHTML = ''; $('#tgDept').innerHTML = $('#tgEditBar').innerHTML = ''; echarts.getInstanceByDom($('#chTg'))?.clear();
     return;
   }
-  // الأقسام الصغيرة (أقل من 3% من مبيعات الشهر السابق) والأصناف خارج الدليل تُجمع معاً
+  const man = await tgLoad(P);
+  // الأقسام الصغيرة (أقل من 3% من مبيعات الفترة السابقة) والأصناف خارج الدليل تُجمع معاً،
+  // إلا القسم اللي إله هدف يدوي، وأثناء التعديل كل قسم بيظهر لحاله حتى ينكتب هدفه
   const p1s = new Map(); let p1t = 0;
-  for (const r of agg) if (r.m === p1) { p1s.set(r.f1, (p1s.get(r.f1) || 0) + r.s); p1t += r.s; }
-  const grp = f => f == null || f === NOT_IN_MASTER || (p1s.get(f) || 0) < p1t * TG_SMALL ? TG_OTHER : f;
+  for (const r of agg) if (r.m === 'p1') { p1s.set(r.f1, (p1s.get(r.f1) || 0) + r.s); p1t += r.s; }
+  const grp = f => f == null || f === NOT_IN_MASTER ? TG_OTHER : S.tgEdit || man[f] ? f : (p1s.get(f) || 0) < p1t * TG_SMALL ? TG_OTHER : f;
   const G = new Map(), blank = name => ({ name, s1: 0, s2: 0, mtd: 0, done: 0, pr: 0, sc: 0, pr1: 0, sc1: 0, days: {} });
   const g = k => G.get(k) || G.set(k, blank(k)).get(k);
   for (const r of agg) {
     const o = g(grp(r.f1));
-    if (r.m === p1) { o.s1 += r.s; o.pr1 += r.pr || 0; o.sc1 += r.sc || 0; }
-    else if (r.m === p2) o.s2 += r.s;
-    else if (r.m === M) { o.mtd += r.s; o.pr += r.pr || 0; o.sc += r.sc || 0; }
+    if (r.m === 'p1') { o.s1 += r.s; o.pr1 += r.pr || 0; o.sc1 += r.sc || 0; }
+    else if (r.m === 'p2') o.s2 += r.s;
+    else { o.mtd += r.s; o.pr += r.pr || 0; o.sc += r.sc || 0; }
   }
   for (const r of daily) { const o = g(grp(r.f1)); o.days[r.d] = (o.days[r.d] || 0) + r.s; if (r.d <= doneEnd) o.done += r.s; }
   const fin = o => {
@@ -1549,8 +1564,6 @@ async function renderTargets() {
     o.m = div(o.pr, o.sc); o.m1 = div(o.pr1, o.sc1);
   };
   const rows = [...G.values()].filter(o => o.s1 > 0);
-  if (!TGS.ready) await tgInit();
-  const man = await tgLoad(M);
   for (const o of rows) {
     const r1 = o.s1 / n1, r2 = n2 ? o.s2 / n2 : 0, k = Math.min(TG_MAX, Math.max(TG_MIN, r2 / r1));
     o.t1 = r1 * nDays; o.t3 = r1 * k * nDays; o.t2 = (o.t1 + o.t3) / 2;
@@ -1566,14 +1579,14 @@ async function renderTargets() {
     for (const [d, v] of Object.entries(o.days)) tot.days[d] = (tot.days[d] || 0) + v;
   }
   fin(tot);
-  TG = { rows, tot, M, end, nDays, doneEnd };
+  TG = { rows, tot, M, end, nDays, doneEnd, P };
 
   const lvHTML = o => o.lv == null ? '—' : `<span class="tg-lv l${o.lv}">${TG_LV[o.lv]}</span>`;
   const started = elapsed > 0;
   $('#tgKpis').innerHTML = [
-    { l: `الهدف (المستوى 2) — ${monthLbl(M)}`, v: F.money(tot.t2), p: `المستوى 1: ${F.money(tot.t1)} · المستوى 3: ${F.money(tot.t3)}` },
+    { l: `الهدف (المستوى 2) — ${esc(P.label)}`, v: F.money(tot.t2), p: `المستوى 1: ${F.money(tot.t1)} · المستوى 3: ${F.money(tot.t3)}` },
     { l: 'المحقق حتى الآن', v: F.money(tot.mtd), p: `${elapsed} من ${nDays} يوماً مكتملاً · ${F.pct(div(tot.mtd, tot.t2))} من الهدف` },
-    { l: 'المتوقع لآخر الشهر', v: started ? F.money(tot.proj) : '—', p: started ? lvHTML(tot) : 'الشهر لم يبدأ بعد' },
+    { l: 'المتوقع لآخر الفترة', v: started ? F.money(tot.proj) : '—', p: started ? lvHTML(tot) : 'الفترة لم تبدأ بعد' },
     { l: 'المطلوب يومياً لبلوغ الهدف', v: tot.need == null ? '—' : F.money(tot.need), p: tot.need == null ? 'انتهى الشهر' : started ? `المعدل الحالي: ${F.money(tot.done / elapsed)} يومياً` : `${nDays} يوماً متبقية` },
   ].map(k => `<div class="kpi"><div class="l">${k.l}</div><div class="v">${k.v}</div><div class="p">${k.p}</div></div>`).join('');
 
@@ -1592,7 +1605,7 @@ async function renderTargets() {
     <td class="num">${F.money(o.mtd)}</td><td class="num">${o.proj == null ? '—' : F.money(o.proj)}</td><td>${bar(o)}</td><td>${lvHTML(o)}</td>
     <td class="num">${o.need == null ? '—' : F.money(o.need)}</td>${S.noProfit ? '' : `<td>${margin(o)}</td>`}</tr>`;
   $('#tblTg').innerHTML = `<thead><tr><th>القسم</th><th class="num">المستوى 1</th><th class="num">المستوى 2 (الهدف)</th><th class="num">المستوى 3</th><th class="num">المحقق</th>
-    <th class="num">المتوقع لآخر الشهر</th><th>التقدّم</th><th>المستوى المتوقع</th><th class="num">المطلوب يومياً للهدف</th>${S.noProfit ? '' : '<th>الهامش</th>'}</tr></thead>
+    <th class="num">المتوقع لآخر الفترة</th><th>التقدّم</th><th>المستوى المتوقع</th><th class="num">المطلوب يومياً للهدف</th>${S.noProfit ? '' : '<th>الهامش</th>'}</tr></thead>
     <tbody>${rows.map(o => tr(o)).join('')}${tr(tot, true)}</tbody>`;
   const nMan = rows.filter(o => o.manual).length;
   $('#tgEditBar').innerHTML = ed
@@ -1600,7 +1613,7 @@ async function renderTargets() {
        <button type="button" class="btn primary" id="tgSave">حفظ الأهداف</button>
        <button type="button" class="btn" id="tgAuto">رجوع للتلقائي</button>
        <button type="button" class="btn" id="tgCancel">إلغاء</button>`
-    : `${nMan ? `<span class="hint">${nMan} قسم بهدف يدوي لشهر ${monthLbl(M)}</span>` : ''}${TGS.admin ? '<button type="button" class="btn" id="tgEdit">✏️ تعديل الأهداف يدوياً</button>' : ''}${TGS.err ? `<span class="hint" style="color:var(--bad)">${esc(TGS.err)}</span>` : ''}`;
+    : `${nMan ? `<span class="hint">${nMan} قسم بهدف يدوي لهذه الفترة</span>` : ''}${TGS.admin ? '<button type="button" class="btn" id="tgEdit">✏️ تعديل الأهداف يدوياً</button>' : ''}${TGS.err ? `<span class="hint" style="color:var(--bad)">${esc(TGS.err)}</span>` : ''}`;
 
   // جدول البيع اليومي: الأحدث أولاً، والخلية تُلوَّن مقارنة بهدف المستوى 2 اليومي
   const cols = [...rows, tot], days = [];
@@ -1640,18 +1653,66 @@ $('#tgMonth').addEventListener('change', async e => { S.tgMonth = e.target.value
 $('#tgDept').addEventListener('change', e => { S.tgDept = e.target.value; drawTgChart(); });
 // ===== الأهداف اليدوية: جدول manual_targets (نفس اللي بيكتب فيه تطبيق الجهاز). المدير العام بس بيعدّل =====
 const TGS = { ready: false, admin: false, err: '' };
-async function tgInit() { TGS.ready = true; TGS.err = ''; TGS.admin = !!PERM.profile?.is_admin; }
-async function tgLoad(M) {
-  const { data, error } = await sb.from('manual_targets').select('dept,t1,t2,t3').eq('m', M);
+// الفترات المخصصة (من تاريخ إلى تاريخ): جدولا target_periods و period_targets
+async function tgInit() { TGS.ready = true; TGS.err = ''; TGS.admin = !!PERM.profile?.is_admin; await tgLoadPeriods(); }
+async function tgLoadPeriods() {
+  const { data, error } = await sb.from('target_periods').select('id,name,d_from,d_to').order('d_from', { ascending: false });
+  TGS.periods = error ? [] : data.map(r => ({ id: r.id, name: r.name, from: r.d_from, to: r.d_to }));
+}
+async function tgLoad(P) {
+  const { data, error } = P.custom ? await sb.from('period_targets').select('dept,t1,t2,t3').eq('period_id', P.id)
+    : await sb.from('manual_targets').select('dept,t1,t2,t3').eq('m', P.from);
   if (error) { TGS.err = 'تعذّر قراءة الأهداف اليدوية'; return {}; }
   TGS.err = '';
   return Object.fromEntries(data.map(r => [r.dept, { t1: +r.t1, t2: +r.t2, t3: +r.t3 }]));
 }
-async function tgSave(M, m) {
-  let r = await sb.from('manual_targets').delete().eq('m', M); if (r.error) throw r.error;
-  const rows = Object.entries(m).map(([dept, v]) => ({ m: M, dept, ...v }));
-  if (rows.length) { r = await sb.from('manual_targets').insert(rows); if (r.error) throw r.error; }
+async function tgSave(P, m) {
+  const [tbl, col, val] = P.custom ? ['period_targets', 'period_id', P.id] : ['manual_targets', 'm', P.from];
+  let r = await sb.from(tbl).delete().eq(col, val); if (r.error) throw r.error;
+  const rows = Object.entries(m).map(([dept, v]) => ({ [col]: val, dept, ...v }));
+  if (rows.length) { r = await sb.from(tbl).insert(rows); if (r.error) throw r.error; }
 }
+function tgPeriodBar(P) {
+  const bar = $('#tgPeriodBar'); if (!bar) return;
+  if (!TGS.admin) { bar.innerHTML = ''; return; }
+  if (TGS.addP) {
+    const t = localToday();
+    bar.innerHTML = `<form id="tgPForm" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+      <input id="tgPName" placeholder="اسم الفترة" required maxlength="60" style="width:150px">
+      <label class="hint">من <input type="date" id="tgPFrom" required value="${t}"></label>
+      <label class="hint">إلى <input type="date" id="tgPTo" required value="${addDays(t, 29)}"></label>
+      <button class="btn primary">إضافة</button><button type="button" class="btn" id="tgPX">إلغاء</button></form>`;
+    return;
+  }
+  bar.innerHTML = `<button type="button" class="btn" id="tgPAdd" title="هدف لمدة تحددها بالأيام بدل الشهر">+ فترة مخصصة</button>${P.custom ? '<button type="button" class="btn" id="tgPDel">حذف الفترة</button>' : ''}`;
+}
+$('#tgPeriodBar').addEventListener('click', async e => {
+  const id = e.target.id;
+  if (!TGS.admin) return;
+  if (id === 'tgPAdd' || id === 'tgPX') { TGS.addP = id === 'tgPAdd'; return tgRerender(false); }
+  if (id === 'tgPDel' && TG?.P?.custom) {
+    if (!confirm(`حذف الفترة «${TG.P.label}» وأهدافها؟`)) return;
+    busy('جارٍ الحذف…');
+    try { const { error } = await sb.from('target_periods').delete().eq('id', TG.P.id); if (error) throw error; await tgLoadPeriods(); S.tgMonth = ''; }
+    catch (err) { alert('تعذّر الحذف: ' + (err.message || err)); } finally { busy(); }
+    return tgRerender(false);
+  }
+});
+$('#tgPeriodBar').addEventListener('submit', async e => {
+  e.preventDefault();
+  const name = $('#tgPName').value.trim(), from = $('#tgPFrom').value, to = $('#tgPTo').value;
+  if (!name || !from || !to) return;
+  if (to < from) { alert('تاريخ النهاية لازم يكون بعد تاريخ البداية'); return; }
+  if (diffDays(from, to) > 366) { alert('أطول فترة مسموحة سنة'); return; }
+  busy('جارٍ إضافة الفترة…');
+  try {
+    const { data, error } = await sb.from('target_periods').insert({ name, d_from: from, d_to: to }).select('id').single();
+    if (error) throw error;
+    await tgLoadPeriods(); S.tgMonth = 'p:' + data.id; TGS.addP = false;
+  } catch (err) { busy(); alert('تعذّر إضافة الفترة: ' + (err.message || err)); return; }
+  finally { busy(); }
+  await tgRerender(true);
+});
 async function tgRerender(edit) { S.tgEdit = edit; busy('جارٍ حساب الأهداف…'); try { await renderTargets(); } finally { busy(); } }
 $('#tgEditBar').addEventListener('click', async e => {
   const id = e.target.id;
@@ -1660,7 +1721,7 @@ $('#tgEditBar').addEventListener('click', async e => {
   if (!TG || !TGS.admin || (id !== 'tgSave' && id !== 'tgAuto')) return;
   let m = {};
   if (id === 'tgAuto') {
-    if (!confirm(`حذف كل الأهداف اليدوية لشهر ${monthLbl(TG.M)} والرجوع للأهداف التلقائية؟`)) return;
+    if (!confirm(`حذف كل الأهداف اليدوية لـ ${TG.P.label} والرجوع للأهداف التلقائية؟`)) return;
   } else {
     const vals = {};
     for (const inp of $$('#tblTg .tg-in')) {
@@ -1678,7 +1739,7 @@ $('#tgEditBar').addEventListener('click', async e => {
     }
   }
   busy('جارٍ حفظ الأهداف…');
-  try { await tgSave(TG.M, m); } catch (err) { busy(); alert('تعذّر حفظ الأهداف: ' + (err.message || err)); return; }
+  try { await tgSave(TG.P, m); } catch (err) { busy(); alert('تعذّر حفظ الأهداف: ' + (err.message || err)); return; }
   await tgRerender(false);
 });
 
