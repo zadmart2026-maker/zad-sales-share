@@ -153,6 +153,8 @@ td.wrap{white-space:normal;min-width:160px}
 .tg-bar b{position:absolute;inset-block:0;width:2px;background:var(--text);opacity:.55}
 .tg-lv{font-weight:600}.tg-lv.l0{color:var(--bad)}.tg-lv.l1{color:var(--s4)}.tg-lv.l2,.tg-lv.l3{color:var(--good)}
 td.tg-hit{background:var(--good-bg)} td.tg-miss{background:var(--bad-bg)}
+.tg-in{width:110px;text-align:end;font:inherit;padding:3px 6px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text)}
+.tg-man{font-size:11px;font-weight:600;padding:1px 6px;border-radius:8px;background:var(--surface-2);color:var(--s1)}
 /* تواريخ الصلاحية */
 .ex-st{display:flex;gap:4px;align-items:center}.ex-st select,.ex-st input{min-height:30px;padding:3px 6px}.ex-st input{width:120px}
 tr.ex-late td{background:var(--bad-bg)}
@@ -597,9 +599,10 @@ tbody tr.drill td:first-child::after{content:" ‹";color:var(--muted)}
           <b>المستوى 1</b> = معدل بيعه اليومي في الشهر السابق × أيام الشهر (المحافظة على المستوى).
           <b>المستوى 3</b> = العودة لمعدل الشهر الذي قبله، على ألا تقل الزيادة عن 6% ولا تزيد عن 15%.
           <b>المستوى 2 (الهدف)</b> = منتصف المسافة بينهما. الأقسام التي حصتها أقل من 3% تُجمع تحت «باقي الأقسام».
-          <b>المتوقع لآخر الشهر</b> = معدل الأيام المكتملة × أيام الشهر (اليوم الجاري لا يدخل حتى يكتمل).</p></div>
+          <b>المتوقع لآخر الشهر</b> = معدل الأيام المكتملة × أيام الشهر (اليوم الجاري لا يدخل حتى يكتمل).
+          الإدارة تقدر تحدد أهداف أي قسم يدوياً، ويظهر جنب القسم <span class="tg-man">يدوي</span>.</p></div>
       <div class="kpis" id="tgKpis"></div>
-      <div class="card"><h3>تقدّم الأقسام</h3>
+      <div class="card"><div class="card-h"><h3>تقدّم الأقسام</h3><span id="tgEditBar" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap"></span></div>
         <p class="hint" style="margin-bottom:8px">الشريط يبيّن المتوقع لآخر الشهر، والخطوط عليه هي المستويات 1 و2 و3. <b>الهامش</b> (قبل الضريبة) يقارن هامش الربح هذا الشهر بالشهر السابق: إذا نزل أكثر من نقطة تظهر ⚠، لأن رفع البيع بالخصومات على حساب الربح لا يُحتسب.</p>
         <div class="tbl-wrap"><table id="tblTg"></table></div></div>
       <div class="card"><div class="card-h"><h3>المبيعات التراكمية مقابل المستويات</h3><select id="tgDept"></select></div>
@@ -1523,7 +1526,7 @@ async function renderTargets() {
   if (!n1) {
     TG = null;
     $('#tgKpis').innerHTML = `<div class="kpi"><div class="l">لا يمكن حساب الأهداف</div><div class="p">لا توجد بيانات لشهر ${monthLbl(p1)}، والأهداف تُبنى على أداء الشهر السابق.</div></div>`;
-    $('#tblTg').innerHTML = $('#tblTgDay').innerHTML = ''; $('#tgDept').innerHTML = ''; echarts.getInstanceByDom($('#chTg'))?.clear();
+    $('#tblTg').innerHTML = $('#tblTgDay').innerHTML = ''; $('#tgDept').innerHTML = $('#tgEditBar').innerHTML = ''; echarts.getInstanceByDom($('#chTg'))?.clear();
     return;
   }
   // الأقسام الصغيرة (أقل من 3% من مبيعات الشهر السابق) والأصناف خارج الدليل تُجمع معاً
@@ -1546,9 +1549,14 @@ async function renderTargets() {
     o.m = div(o.pr, o.sc); o.m1 = div(o.pr1, o.sc1);
   };
   const rows = [...G.values()].filter(o => o.s1 > 0);
+  if (!TGS.ready) await tgInit();
+  const man = await tgLoad(M);
   for (const o of rows) {
     const r1 = o.s1 / n1, r2 = n2 ? o.s2 / n2 : 0, k = Math.min(TG_MAX, Math.max(TG_MIN, r2 / r1));
     o.t1 = r1 * nDays; o.t3 = r1 * k * nDays; o.t2 = (o.t1 + o.t3) / 2;
+    o.a1 = o.t1; o.a2 = o.t2; o.a3 = o.t3;
+    const mv = man[o.name];
+    if (mv) { o.t1 = mv.t1; o.t2 = mv.t2; o.t3 = mv.t3; o.manual = true; }
     fin(o);
   }
   rows.sort((a, b) => (a.name === TG_OTHER) - (b.name === TG_OTHER) || b.t2 - a.t2);
@@ -1576,12 +1584,23 @@ async function renderTargets() {
     return `<div class="tg-bar" title="المتوقع ${F.money(o.proj)}"><i class="l${o.lv}" style="width:${at(o.proj)}"></i>${[o.t1, o.t2, o.t3].map(t => `<b style="inset-inline-start:${at(t)}"></b>`).join('')}</div>`;
   };
   const margin = o => o.m == null ? '—' : F.pct(o.m) + (o.m1 != null && o.m < o.m1 - 0.01 ? ` <span class="d bad" title="الشهر السابق ${F.pct(o.m1)}">⚠ ${nf((o.m1 - o.m) * 100, 1)} نقطة</span>` : '');
-  const tr = (o, b) => `<tr${b ? ' style="font-weight:600"' : ''}><td>${esc(o.name)}</td><td class="num">${F.money(o.t1)}</td><td class="num"><b>${F.money(o.t2)}</b></td><td class="num">${F.money(o.t3)}</td>
+  const ed = !!S.tgEdit && TGS.admin;
+  const tcell = (o, k, b) => ed && o !== tot
+    ? `<td class="num"><input type="number" class="tg-in" min="0" step="100" data-n="${esc(o.name)}" data-k="${k}" value="${Math.round(o[k])}" title="التلقائي: ${F.money(o['a' + k[1]])}"></td>`
+    : `<td class="num">${b ? `<b>${F.money(o[k])}</b>` : F.money(o[k])}</td>`;
+  const tr = (o, b) => `<tr${b ? ' style="font-weight:600"' : ''}><td>${esc(o.name)}${o.manual ? ' <span class="tg-man" title="هدف يدوي — التلقائي: ' + F.money(o.a2) + '">يدوي</span>' : ''}</td>${tcell(o, 't1')}${tcell(o, 't2', true)}${tcell(o, 't3')}
     <td class="num">${F.money(o.mtd)}</td><td class="num">${o.proj == null ? '—' : F.money(o.proj)}</td><td>${bar(o)}</td><td>${lvHTML(o)}</td>
     <td class="num">${o.need == null ? '—' : F.money(o.need)}</td>${S.noProfit ? '' : `<td>${margin(o)}</td>`}</tr>`;
   $('#tblTg').innerHTML = `<thead><tr><th>القسم</th><th class="num">المستوى 1</th><th class="num">المستوى 2 (الهدف)</th><th class="num">المستوى 3</th><th class="num">المحقق</th>
     <th class="num">المتوقع لآخر الشهر</th><th>التقدّم</th><th>المستوى المتوقع</th><th class="num">المطلوب يومياً للهدف</th>${S.noProfit ? '' : '<th>الهامش</th>'}</tr></thead>
     <tbody>${rows.map(o => tr(o)).join('')}${tr(tot, true)}</tbody>`;
+  const nMan = rows.filter(o => o.manual).length;
+  $('#tgEditBar').innerHTML = ed
+    ? `<span class="hint">غيّر <b>المستوى 2 (الهدف)</b> والمستويان 1 و3 بيتحركوا معه بنفس النسبة. الخانة الفارغة ترجع للتلقائي.</span>
+       <button type="button" class="btn primary" id="tgSave">حفظ الأهداف</button>
+       <button type="button" class="btn" id="tgAuto">رجوع للتلقائي</button>
+       <button type="button" class="btn" id="tgCancel">إلغاء</button>`
+    : `${nMan ? `<span class="hint">${nMan} قسم بهدف يدوي لشهر ${monthLbl(M)}</span>` : ''}${TGS.admin ? '<button type="button" class="btn" id="tgEdit">✏️ تعديل الأهداف يدوياً</button>' : ''}${TGS.err ? `<span class="hint" style="color:var(--bad)">${esc(TGS.err)}</span>` : ''}`;
 
   // جدول البيع اليومي: الأحدث أولاً، والخلية تُلوَّن مقارنة بهدف المستوى 2 اليومي
   const cols = [...rows, tot], days = [];
@@ -1619,6 +1638,49 @@ function drawTgChart() {
 }
 $('#tgMonth').addEventListener('change', async e => { S.tgMonth = e.target.value; busy('جارٍ حساب الأهداف…'); try { await renderTargets(); } finally { busy(); } });
 $('#tgDept').addEventListener('change', e => { S.tgDept = e.target.value; drawTgChart(); });
+// ===== الأهداف اليدوية: جدول manual_targets (نفس اللي بيكتب فيه تطبيق الجهاز). المدير العام بس بيعدّل =====
+const TGS = { ready: false, admin: false, err: '' };
+async function tgInit() { TGS.ready = true; TGS.err = ''; TGS.admin = !!PERM.profile?.is_admin; }
+async function tgLoad(M) {
+  const { data, error } = await sb.from('manual_targets').select('dept,t1,t2,t3').eq('m', M);
+  if (error) { TGS.err = 'تعذّر قراءة الأهداف اليدوية'; return {}; }
+  TGS.err = '';
+  return Object.fromEntries(data.map(r => [r.dept, { t1: +r.t1, t2: +r.t2, t3: +r.t3 }]));
+}
+async function tgSave(M, m) {
+  let r = await sb.from('manual_targets').delete().eq('m', M); if (r.error) throw r.error;
+  const rows = Object.entries(m).map(([dept, v]) => ({ m: M, dept, ...v }));
+  if (rows.length) { r = await sb.from('manual_targets').insert(rows); if (r.error) throw r.error; }
+}
+async function tgRerender(edit) { S.tgEdit = edit; busy('جارٍ حساب الأهداف…'); try { await renderTargets(); } finally { busy(); } }
+$('#tgEditBar').addEventListener('click', async e => {
+  const id = e.target.id;
+  if (id === 'tgEdit') return tgRerender(true);
+  if (id === 'tgCancel') return tgRerender(false);
+  if (!TG || !TGS.admin || (id !== 'tgSave' && id !== 'tgAuto')) return;
+  let m = {};
+  if (id === 'tgAuto') {
+    if (!confirm(`حذف كل الأهداف اليدوية لشهر ${monthLbl(TG.M)} والرجوع للأهداف التلقائية؟`)) return;
+  } else {
+    const vals = {};
+    for (const inp of $$('#tblTg .tg-in')) {
+      const v = inp.value.trim() === '' ? null : Number(inp.value);
+      if (v != null && !(v >= 0)) { alert('أدخل أرقاماً صحيحة'); inp.focus(); return; }
+      (vals[inp.dataset.n] ||= {})[inp.dataset.k] = v;
+    }
+    for (const o of TG.rows) {
+      const v = vals[o.name]; if (!v) continue;
+      const auto = [o.a1, o.a2, o.a3].map(Math.round), cur = [o.t1, o.t2, o.t3].map(Math.round);
+      const t = ['t1', 't2', 't3'].map((k, i) => v[k] ?? auto[i]);
+      if (t[1] !== cur[1] && t[0] === cur[0] && t[2] === cur[2] && cur[1] > 0) { t[0] = Math.round(cur[0] * t[1] / cur[1]); t[2] = Math.round(cur[2] * t[1] / cur[1]); }
+      if (!(t[0] <= t[1] && t[1] <= t[2])) { alert(`${o.name}: لازم المستوى 1 ≤ الهدف ≤ المستوى 3`); return; }
+      if (t.some((x, i) => x !== auto[i])) m[o.name] = { t1: t[0], t2: t[1], t3: t[2] };
+    }
+  }
+  busy('جارٍ حفظ الأهداف…');
+  try { await tgSave(TG.M, m); } catch (err) { busy(); alert('تعذّر حفظ الأهداف: ' + (err.message || err)); return; }
+  await tgRerender(false);
+});
 
 /* ============ تواريخ الصلاحية (من تطبيق Zad Staff) ============
    الموظفون يدخلون تاريخ الانتهاء والكمية من Zad Staff بمسح الباركود، وهنا المتابعة وتغيير الحالة.
@@ -4318,6 +4380,7 @@ async function startApp(user) {
   PERM.profile = must(await sb.from('user_profile').select('full_name,is_admin,can_see_profit,tabs').eq('user_id', user.id).maybeSingle());
   PERM.depts = must(await sb.from('user_dept').select('dept').eq('user_id', user.id)).map(r => r.dept).sort();
   PERM.tabs = PERM.profile?.tabs || [];
+  TGS.ready = false; S.tgEdit = false;
   $('#whoAmI').textContent = PERM.profile?.full_name || user.email;
   if (!PERM.profile || (!PERM.profile.is_admin && (!PERM.tabs.length || !PERM.depts.length))) { await wipeLocal(); $('#status').textContent = 'لا توجد لك صلاحيات بعد. تواصل مع الإدارة.'; return; }
   S.noProfit = !(PERM.profile.is_admin || PERM.profile.can_see_profit);
