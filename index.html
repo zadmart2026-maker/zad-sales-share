@@ -3295,16 +3295,8 @@ class Table {
   /** أعمدة التصدير: في جداول الأصناف القسم ← العائلة ← الفرعية أولاً (بدل عمودي القسم/العائلة المعروضين) */
   /** جدول فيه أقسام (حتى لو قسم واحد بسبب الفلتر) → التصدير بيجمّع حسب القسم */
   hasHier() { return this.famOn || (this.o.fam !== false && this.rows.some(r => r.f1 != null && r.f1 !== '')); }
-  exportCols() {
-    if (!this.hasHier()) return this.cols;
-    // ترتيب عملي: الصنف ورمزه، ثم عائلته، ثم الأرقام من الأهم للأقل. نسبة الانتشار ونسبة المردود تُترك (أرقام صغيرة جداً على مستوى الصنف)
-    const by = k => this.cols.find(c => c.k === k);
-    const text = [by('name'), by('code'), { k: 'f2', l: 'العائلة', f: 'text' }, { k: 'f3', l: 'العائلة الفرعية', f: 'text' }, { k: 'f1', l: FAM_LEVELS[0], f: 'text' }].filter(Boolean);
-    const order = ['sales', 'share', 'qty', 'avgp', 'profit', 'margin', 'invs', 'rets', 'psales', 'gr', 'abc'];
-    const skip = new Set(['cat', 'fam', 'f1', 'f2', 'f3', 'name', 'code', 'pen', 'retr', 'cum', 'diff']);
-    const nums = [...order.map(by).filter(Boolean), ...this.cols.filter(c => !skip.has(c.k) && !order.includes(c.k))];
-    return [...text, ...nums.map(c => c.k === 'share' ? { ...c, l: 'الحصة من الملف', f: 'pct' } : c)];
-  }
+  /** التصدير = نفس الجدول المعروض: نفس الأعمدة بنفس الترتيب */
+  exportCols() { return this.cols; }
   csvExport(rows, cols) {
     const cell = v => { if (v == null) return ''; const s = typeof v === 'number' ? String(Math.round(v * 10000) / 10000) : String(v); return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
     const csv = '﻿' + [cols.map(c => cell(c.l)).join(','), ...rows.map(x => cols.map(c => cell(x[c.k])).join(','))].join('\r\n');
@@ -3316,22 +3308,13 @@ class Table {
     const btn = this.el.querySelector('.exp'); btn.disabled = true; const lbl = btn.textContent; btn.textContent = 'جارٍ التجهيز…';
     try {
       await loadScript('https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js');
-      // جداول الأصناف: القسم ← العائلة ← الصنف، كل مستوى من الأعلى مبيعاً للأقل،
-      // والحصة تُحسب من مجموع الملف نفسه (مش من كل المحل) حتى تكون مفهومة بعد الفلترة
+      // الصفوف بنفس ترتيب وفلاتر الجدول على الشاشة؛ ملخص الأقسام والعائلات بورقة ثانية منفصلة
       const hier = this.hasHier();
-      if (hier) {
-        const k = v => v == null || v === '' ? '—' : String(v), sv = x => typeof x.sales === 'number' && isFinite(x.sales) ? x.sales : 0;
-        const ds = new Map(), fs = new Map(); let tot = 0;
-        for (const x of rows) { ds.set(k(x.f1), (ds.get(k(x.f1)) || 0) + sv(x)); const fk = k(x.f1) + '\u0001' + k(x.f2); fs.set(fk, (fs.get(fk) || 0) + sv(x)); tot += sv(x); }
-        rows = rows.map(x => ({ ...x, share: tot ? sv(x) / tot : null }))
-          .sort((a, b) => ds.get(k(b.f1)) - ds.get(k(a.f1)) || k(a.f1).localeCompare(k(b.f1), 'ar')
-            || fs.get(k(b.f1) + '\u0001' + k(b.f2)) - fs.get(k(a.f1) + '\u0001' + k(a.f2)) || k(a.f2).localeCompare(k(b.f2), 'ar') || sv(b) - sv(a));
-      }
       const title = this.o.title || this.el.closest('.card')?.querySelector('h3')?.textContent?.trim() || 'جدول';
       // فلاتر أعلى الصفحة (القسم الرئيسي ← العائلة …) ثم فلاتر الجدول نفسه
       const top = (S.fam || []).map((s, i) => s.length ? `${FAM_LEVELS[i] || 'القسم'}: ${s.join('، ')}` : '').filter(Boolean).join(' · ');
       const filters = [top, this.fam.map((s, i) => s.length ? `${['القسم', 'العائلة', 'الفرعية'][i]}: ${s.join('، ')}` : '').filter(Boolean).join(' · '), this.term ? `بحث: «${this.term}»` : '', Object.keys(this.cf).length ? `فلاتر أعمدة: ${Object.keys(this.cf).map(k => this.cols.find(c => c.k === k)?.l || k).join('، ')}` : ''].filter(Boolean).join(' · ');
-      const buf = await xlsxBook({ title, cols, rows, group: hier, filters });
+      const buf = await xlsxBook({ title, cols, rows, group: false, summary: hier, filters });
       download(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `زاد مارت - ${title} - ${S.from} إلى ${S.to}.xlsx`);
     } catch (e) {
       console.error(e);
@@ -3405,7 +3388,7 @@ window.addEventListener('scroll', () => HeadFilter.close(), { passive: true });
 const XL_SUM = new Set(['sales', 'qty', 'profit', 'rets', 'psales', 'diff', 'share', 'sales_c', 'cost', 'disc', 'value', 'lines']);
 const XL_FMT = { money: '#,##0.00', int: '#,##0', qty: '#,##0.##', num1: '#,##0.0', num2: '#,##0.00', pct: '0.0%', share: '0.00%', delta: '+0.0%;-0.0%;0.0%' };
 const XL = { brand: 'FF9B1C1C', head: 'FF7A1616', headTx: 'FFFFFFFF', band: 'FFF7F5F2', line: 'FFDDD8D0', grp: 'FFF1E4E2', grpTx: 'FF5E1212', tot: 'FFE9DFD0', muted: 'FF6B655E', good: 'FF1E7B45', bad: 'FFB42318' };
-async function xlsxBook({ title, cols, rows, group, filters }) {
+async function xlsxBook({ title, cols, rows, group, summary, filters }) {
   const wb = new ExcelJS.Workbook(); wb.creator = 'زاد مارت'; wb.created = new Date();
   const font = { name: 'Arial', size: 10 };
   const ws = wb.addWorksheet(title.slice(0, 31).replace(/[\\/*?:\[\]]/g, ' '), { views: [{ rightToLeft: true, showGridLines: false }], properties: { outlineLevelRow: 2 } });
@@ -3429,8 +3412,6 @@ async function xlsxBook({ title, cols, rows, group, filters }) {
   const put = (row, x, { band, bold, fill, txColor } = {}) => {
     cols.forEach((c, i) => {
       const cell = row.getCell(i + 1); let v = x[c.k];
-      // التغير: صنف ما انباع بفترة المقارنة = «جديد»، وقفزة أكثر من 500% تُكتب كنص بدل رقم ضخم
-      if (c.f === 'delta' && !x._sum) { if ('psales' in x && !x.psales && (x.sales || 0) > 0) v = 'جديد'; else if (typeof v === 'number' && v > 5) v = 'أكثر من +500%'; }
       if (typeof v === 'number') v = !isFinite(v) ? null : ['pct', 'share', 'delta'].includes(c.f) ? Math.round(v * 1e6) / 1e6 : Math.round(v * 1000) / 1000;
       cell.value = v == null || v === '' ? null : c.f === 'text' ? String(v) : typeof v === 'number' ? v : Number(v) || String(v);
       cell.font = { ...font, bold: !!bold, color: txColor ? { argb: txColor } : undefined };
@@ -3484,7 +3465,7 @@ async function xlsxBook({ title, cols, rows, group, filters }) {
   ws.pageSetup = { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0, paperSize: 9, margins: { left: 0.4, right: 0.4, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 }, printTitlesRow: `${hr}:${hr}` };
   ws.headerFooter = { oddFooter: `&Rزاد مارت · ${title}&Lصفحة &P من &N` };
   // ورقة ملخص الأقسام لجداول الأصناف
-  if (group && rows.length) {
+  if ((summary ?? group) && rows.length) {
     const sm = wb.addWorksheet('ملخص الأقسام والعائلات', { views: [{ rightToLeft: true, showGridLines: false, state: 'frozen', ySplit: 3 }] });
     const has = k => cols.some(c => c.k === k);
     const sc = [{ k: 'dept', l: 'القسم / العائلة', f: 'text' }, { k: 'n', l: 'عدد الأصناف', f: 'int' }, ...(has('sales') ? [{ k: 'sales', l: 'المبيعات', f: 'money' }, { k: 'share', l: 'الحصة من الملف', f: 'pct' }] : []),
