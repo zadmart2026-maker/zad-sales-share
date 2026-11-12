@@ -3297,8 +3297,13 @@ class Table {
   hasHier() { return this.famOn || (this.o.fam !== false && this.rows.some(r => r.f1 != null && r.f1 !== '')); }
   exportCols() {
     if (!this.hasHier()) return this.cols;
-    const hier = ['f1', 'f2', 'f3'].map((k, i) => ({ k, l: FAM_LEVELS[i] || k, f: 'text', hier: true }));
-    return [...hier, ...this.cols.filter(c => !['cat', 'fam', 'f1', 'f2', 'f3'].includes(c.k))];
+    // ترتيب عملي: الصنف ورمزه، ثم عائلته، ثم الأرقام من الأهم للأقل. نسبة الانتشار ونسبة المردود تُترك (أرقام صغيرة جداً على مستوى الصنف)
+    const by = k => this.cols.find(c => c.k === k);
+    const text = [by('name'), by('code'), { k: 'f2', l: 'العائلة', f: 'text' }, { k: 'f3', l: 'العائلة الفرعية', f: 'text' }, { k: 'f1', l: FAM_LEVELS[0], f: 'text' }].filter(Boolean);
+    const order = ['sales', 'share', 'qty', 'avgp', 'profit', 'margin', 'invs', 'rets', 'psales', 'gr', 'abc'];
+    const skip = new Set(['cat', 'fam', 'f1', 'f2', 'f3', 'name', 'code', 'pen', 'retr', 'cum', 'diff']);
+    const nums = [...order.map(by).filter(Boolean), ...this.cols.filter(c => !skip.has(c.k) && !order.includes(c.k))];
+    return [...text, ...nums.map(c => c.k === 'share' ? { ...c, l: 'الحصة من الملف', f: 'pct' } : c)];
   }
   csvExport(rows, cols) {
     const cell = v => { if (v == null) return ''; const s = typeof v === 'number' ? String(Math.round(v * 10000) / 10000) : String(v); return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
@@ -3311,13 +3316,16 @@ class Table {
     const btn = this.el.querySelector('.exp'); btn.disabled = true; const lbl = btn.textContent; btn.textContent = 'جارٍ التجهيز…';
     try {
       await loadScript('https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js');
-      // جداول الأصناف: ترتيب حسب القسم ثم العائلة، مع الحفاظ على ترتيب الجدول داخل كل عائلة
-      // الأقسام من الأعلى مبيعاً للأقل، وداخل كل قسم حسب العائلة
+      // جداول الأصناف: القسم ← العائلة ← الصنف، كل مستوى من الأعلى مبيعاً للأقل،
+      // والحصة تُحسب من مجموع الملف نفسه (مش من كل المحل) حتى تكون مفهومة بعد الفلترة
       const hier = this.hasHier();
       if (hier) {
-        const k = v => v == null || v === '' ? '￿' : String(v), ds = new Map();
-        for (const x of rows) ds.set(k(x.f1), (ds.get(k(x.f1)) || 0) + (typeof x.sales === 'number' ? x.sales : 0));
-        rows = [...rows].sort((a, b) => ds.get(k(b.f1)) - ds.get(k(a.f1)) || k(a.f1).localeCompare(k(b.f1), 'ar') || k(a.f2).localeCompare(k(b.f2), 'ar'));
+        const k = v => v == null || v === '' ? '—' : String(v), sv = x => typeof x.sales === 'number' && isFinite(x.sales) ? x.sales : 0;
+        const ds = new Map(), fs = new Map(); let tot = 0;
+        for (const x of rows) { ds.set(k(x.f1), (ds.get(k(x.f1)) || 0) + sv(x)); const fk = k(x.f1) + '\u0001' + k(x.f2); fs.set(fk, (fs.get(fk) || 0) + sv(x)); tot += sv(x); }
+        rows = rows.map(x => ({ ...x, share: tot ? sv(x) / tot : null }))
+          .sort((a, b) => ds.get(k(b.f1)) - ds.get(k(a.f1)) || k(a.f1).localeCompare(k(b.f1), 'ar')
+            || fs.get(k(b.f1) + '\u0001' + k(b.f2)) - fs.get(k(a.f1) + '\u0001' + k(a.f2)) || k(a.f2).localeCompare(k(b.f2), 'ar') || sv(b) - sv(a));
       }
       const title = this.o.title || this.el.closest('.card')?.querySelector('h3')?.textContent?.trim() || 'جدول';
       // فلاتر أعلى الصفحة (القسم الرئيسي ← العائلة …) ثم فلاتر الجدول نفسه
@@ -3400,7 +3408,7 @@ const XL = { brand: 'FF9B1C1C', head: 'FF7A1616', headTx: 'FFFFFFFF', band: 'FFF
 async function xlsxBook({ title, cols, rows, group, filters }) {
   const wb = new ExcelJS.Workbook(); wb.creator = 'زاد مارت'; wb.created = new Date();
   const font = { name: 'Arial', size: 10 };
-  const ws = wb.addWorksheet(title.slice(0, 31).replace(/[\\/*?:\[\]]/g, ' '), { views: [{ rightToLeft: true, showGridLines: false }], properties: { outlineLevelRow: 1 } });
+  const ws = wb.addWorksheet(title.slice(0, 31).replace(/[\\/*?:\[\]]/g, ' '), { views: [{ rightToLeft: true, showGridLines: false }], properties: { outlineLevelRow: 2 } });
   ws.properties.outlineProperties = { summaryBelow: true };
   const n = cols.length, sumCols = cols.map(c => XL_SUM.has(c.k) && c.f !== 'text');
   const border = { top: { style: 'thin', color: { argb: XL.line } }, bottom: { style: 'thin', color: { argb: XL.line } }, left: { style: 'thin', color: { argb: XL.line } }, right: { style: 'thin', color: { argb: XL.line } } };
@@ -3421,6 +3429,8 @@ async function xlsxBook({ title, cols, rows, group, filters }) {
   const put = (row, x, { band, bold, fill, txColor } = {}) => {
     cols.forEach((c, i) => {
       const cell = row.getCell(i + 1); let v = x[c.k];
+      // التغير: صنف ما انباع بفترة المقارنة = «جديد»، وقفزة أكثر من 500% تُكتب كنص بدل رقم ضخم
+      if (c.f === 'delta' && !x._sum) { if ('psales' in x && !x.psales && (x.sales || 0) > 0) v = 'جديد'; else if (typeof v === 'number' && v > 5) v = 'أكثر من +500%'; }
       if (typeof v === 'number') v = !isFinite(v) ? null : ['pct', 'share', 'delta'].includes(c.f) ? Math.round(v * 1e6) / 1e6 : Math.round(v * 1000) / 1000;
       cell.value = v == null || v === '' ? null : c.f === 'text' ? String(v) : typeof v === 'number' ? v : Number(v) || String(v);
       cell.font = { ...font, bold: !!bold, color: txColor ? { argb: txColor } : undefined };
@@ -3432,18 +3442,34 @@ async function xlsxBook({ title, cols, rows, group, filters }) {
       cell.border = border;
     });
   };
-  const sumRow = (list, label) => { const o = {}; cols.forEach((c, i) => { if (sumCols[i]) o[c.k] = list.reduce((a, x) => a + (typeof x[c.k] === 'number' && isFinite(x[c.k]) ? x[c.k] : 0), 0); }); o[cols[0].k] = label; return o; };
+  // صف مجموع: يجمع الأعمدة القابلة للجمع ويحسب منها الهامش ومتوسط السعر والتغير (بدل تركها فاضية أو جمع نسب)
+  const num = v => typeof v === 'number' && isFinite(v) ? v : 0;
+  const sumRow = (list, label) => {
+    const o = { _sum: true }; cols.forEach((c, i) => { if (sumCols[i]) o[c.k] = list.reduce((a, x) => a + num(x[c.k]), 0); });
+    const s = list.reduce((a, x) => a + num(x.sales), 0), sc = list.reduce((a, x) => a + num(x.sales_c), 0), ps = list.reduce((a, x) => a + num(x.psales), 0), q = list.reduce((a, x) => a + num(x.qty), 0);
+    if (cols.some(c => c.k === 'margin') && sc) o.margin = list.reduce((a, x) => a + num(x.profit), 0) / sc;
+    if (cols.some(c => c.k === 'gr') && ps) o.gr = s / ps - 1;
+    o[cols[0].k] = label; return o;
+  };
+  const head1 = (label, lvl) => {
+    const gh = ws.getRow(++rn); ws.mergeCells(rn, 1, rn, n); const c = gh.getCell(1);
+    c.value = label; c.font = { ...font, size: lvl ? 10 : 11, bold: true, color: { argb: XL.grpTx } };
+    c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: lvl ? XL.band : XL.grp } }; c.alignment = { horizontal: 'right', vertical: 'middle', indent: lvl ? 1 : 0 }; gh.height = lvl ? 18 : 22;
+    if (lvl) gh.outlineLevel = 1;
+  };
   let rn = hr, band = false;
   if (group) {
-    // كل قسم: صف عنوان، ثم أصنافه (قابلة للطي)، ثم صف المجموع
-    const groups = []; for (const x of rows) { const k = x.f1 ?? '(بدون قسم)'; if (!groups.length || groups[groups.length - 1].k !== k) groups.push({ k, items: [] }); groups[groups.length - 1].items.push(x); }
-    for (const g of groups) {
-      const gh = ws.getRow(++rn); ws.mergeCells(rn, 1, rn, n);
-      gh.getCell(1).value = `${g.k} — ${nf(g.items.length)} صنف`; gh.getCell(1).font = { ...font, size: 11, bold: true, color: { argb: XL.grpTx } };
-      gh.getCell(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: XL.grp } }; gh.getCell(1).alignment = { horizontal: 'right', vertical: 'middle' }; gh.height = 20;
-      band = false;
-      for (const x of g.items) { const row = ws.getRow(++rn); put(row, x, { band }); row.outlineLevel = 1; band = !band; }
-      const s = ws.getRow(++rn); put(s, sumRow(g.items, `مجموع ${g.k}`), { bold: true, fill: XL.tot });
+    // القسم: عنوان ← (العائلة: أصنافها ثم مجموعها) ← مجموع القسم. أزرار + / − على جنب الورقة تطوي العائلات والأقسام
+    const split = (list, key) => { const g = []; for (const x of list) { const k = x[key] == null || x[key] === '' ? '—' : x[key]; if (!g.length || g[g.length - 1].k !== k) g.push({ k, items: [] }); g[g.length - 1].items.push(x); } return g; };
+    for (const d of split(rows, 'f1')) {
+      head1(`${d.k} — ${nf(d.items.length)} صنف`, 0);
+      const fams = split(d.items, 'f2'), famSums = fams.length > 1;   // قسم بعائلة وحدة (أو بدون عائلات) ما بيحتاج مجموع عائلة
+      for (const f of fams) {
+        band = false;
+        for (const x of f.items) { const row = ws.getRow(++rn); put(row, x, { band }); row.outlineLevel = famSums ? 2 : 1; band = !band; }
+        if (famSums) { const s = ws.getRow(++rn); put(s, sumRow(f.items, `مجموع ${f.k} (${nf(f.items.length)} صنف)`), { bold: true, fill: XL.band }); s.outlineLevel = 1; }
+      }
+      const s = ws.getRow(++rn); put(s, sumRow(d.items, `مجموع ${d.k}`), { bold: true, fill: XL.tot });
     }
   } else for (const x of rows) { put(ws.getRow(++rn), x, { band }); band = !band; }
   if (sumCols.some(Boolean) && rows.length) { const s = ws.getRow(++rn); put(s, sumRow(rows, 'المجموع الكلي'), { bold: true, fill: XL.head, txColor: XL.headTx }); }
@@ -3459,26 +3485,30 @@ async function xlsxBook({ title, cols, rows, group, filters }) {
   ws.headerFooter = { oddFooter: `&Rزاد مارت · ${title}&Lصفحة &P من &N` };
   // ورقة ملخص الأقسام لجداول الأصناف
   if (group && rows.length) {
-    const sm = wb.addWorksheet('ملخص الأقسام', { views: [{ rightToLeft: true, showGridLines: false, state: 'frozen', ySplit: 3 }] });
+    const sm = wb.addWorksheet('ملخص الأقسام والعائلات', { views: [{ rightToLeft: true, showGridLines: false, state: 'frozen', ySplit: 3 }] });
     const has = k => cols.some(c => c.k === k);
-    const sc = [{ k: 'dept', l: 'القسم', f: 'text' }, { k: 'n', l: 'عدد الأصناف', f: 'int' }, ...(has('sales') ? [{ k: 'sales', l: 'المبيعات', f: 'money' }, { k: 'share', l: 'الحصة من المجموع', f: 'pct' }] : []),
+    const sc = [{ k: 'dept', l: 'القسم / العائلة', f: 'text' }, { k: 'n', l: 'عدد الأصناف', f: 'int' }, ...(has('sales') ? [{ k: 'sales', l: 'المبيعات', f: 'money' }, { k: 'share', l: 'الحصة من الملف', f: 'pct' }] : []),
       ...(has('qty') ? [{ k: 'qty', l: 'الكمية', f: 'qty' }] : []), ...(has('profit') ? [{ k: 'profit', l: 'الربح', f: 'money' }, { k: 'margin', l: 'الهامش', f: 'pct' }] : []),
       ...(has('rets') ? [{ k: 'rets', l: 'المردودات', f: 'money' }] : []), ...(has('psales') ? [{ k: 'psales', l: 'فترة المقارنة', f: 'money' }, { k: 'gr', l: 'التغير', f: 'delta' }] : [])];
-    const m = new Map(); for (const x of rows) { const k = x.f1 ?? '(بدون قسم)'; const o = m.get(k) || m.set(k, { dept: k, n: 0, sales: 0, qty: 0, profit: 0, sales_c: 0, rets: 0, psales: 0 }).get(k); o.n++; for (const f of ['sales', 'qty', 'profit', 'sales_c', 'rets', 'psales']) o[f] += typeof x[f] === 'number' && isFinite(x[f]) ? x[f] : 0; }
-    const list = [...m.values()].sort((a, b) => b.sales - a.sales), tot = list.reduce((a, o) => { for (const f of ['n', 'sales', 'qty', 'profit', 'sales_c', 'rets', 'psales']) a[f] += o[f]; return a; }, { dept: 'المجموع', n: 0, sales: 0, qty: 0, profit: 0, sales_c: 0, rets: 0, psales: 0 });
+    const F_ = ['sales', 'qty', 'profit', 'sales_c', 'rets', 'psales'], blankS = dept => ({ dept, n: 0, sales: 0, qty: 0, profit: 0, sales_c: 0, rets: 0, psales: 0, fams: new Map() });
+    const m = new Map(), add = (o, x) => { o.n++; for (const f of F_) o[f] += num(x[f]); };
+    for (const x of rows) { const k = x.f1 ?? '—', fk = x.f2 ?? '—'; const o = m.get(k) || m.set(k, blankS(k)).get(k); add(o, x); const fo = o.fams.get(fk) || o.fams.set(fk, blankS('    ' + fk)).get(fk); add(fo, x); }
+    const depts = [...m.values()].sort((a, b) => b.sales - a.sales), tot = blankS('المجموع');
+    for (const o of depts) { tot.n += o.n; for (const f of F_) tot[f] += o[f]; }
+    const list = depts.flatMap(o => { const fs = [...o.fams.values()].filter(f => f.dept.trim() !== '—'); return [Object.assign(o, { top: true }), ...(fs.length > 1 ? fs.sort((a, b) => b.sales - a.sales) : [])]; });
     for (const o of [...list, tot]) { o.share = tot.sales ? o.sales / tot.sales : null; o.margin = o.sales_c ? o.profit / o.sales_c : null; o.gr = o.psales ? o.sales / o.psales - 1 : null; }
-    sm.mergeCells(1, 1, 1, sc.length); sm.getCell(1, 1).value = `زاد مارت · ملخص الأقسام — ${S.from} إلى ${S.to}`; sm.getCell(1, 1).font = { ...font, size: 14, bold: true, color: { argb: XL.brand } }; sm.getRow(1).height = 24;
+    sm.mergeCells(1, 1, 1, sc.length); sm.getCell(1, 1).value = `زاد مارت · ملخص الأقسام والعائلات — ${S.from} إلى ${S.to}`; sm.getCell(1, 1).font = { ...font, size: 14, bold: true, color: { argb: XL.brand } }; sm.getRow(1).height = 24;
     sm.mergeCells(2, 1, 2, sc.length); sm.getCell(2, 1).value = `المبالغ ${TAX_LBL()} بعد المردودات${filters ? ' · ' + filters : ''}`; sm.getCell(2, 1).font = { ...font, color: { argb: XL.muted } };
     sc.forEach((c, i) => { const cell = sm.getRow(3).getCell(i + 1); cell.value = c.l; cell.font = { ...font, bold: true, color: { argb: XL.headTx } }; cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: XL.head } }; cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true }; cell.border = border; sm.getColumn(i + 1).width = c.f === 'text' ? 30 : 16; });
     sm.getRow(3).height = 28;
     [...list, tot].forEach((o, j) => {
       const row = sm.getRow(4 + j), last = o === tot;
       sc.forEach((c, i) => { const cell = row.getCell(i + 1); let v = o[c.k]; if (typeof v === 'number') v = !isFinite(v) ? null : ['pct', 'delta'].includes(c.f) ? Math.round(v * 1e6) / 1e6 : Math.round(v * 1000) / 1000; cell.value = v == null ? null : v; if (c.f !== 'text') cell.numFmt = XL_FMT[c.f];
-        cell.font = { ...font, bold: last, color: last ? { argb: XL.headTx } : c.f === 'delta' && v ? { argb: v > 0 ? XL.good : XL.bad } : undefined };
-        cell.fill = last ? { type: 'pattern', pattern: 'solid', fgColor: { argb: XL.head } } : j % 2 ? { type: 'pattern', pattern: 'solid', fgColor: { argb: XL.band } } : undefined;
+        cell.font = { ...font, bold: last || o.top, color: last ? { argb: XL.headTx } : c.f === 'delta' && v ? { argb: v > 0 ? XL.good : XL.bad } : o.top ? { argb: XL.grpTx } : undefined };
+        cell.fill = last ? { type: 'pattern', pattern: 'solid', fgColor: { argb: XL.head } } : o.top ? { type: 'pattern', pattern: 'solid', fgColor: { argb: XL.grp } } : undefined;
         cell.alignment = { horizontal: c.f === 'text' ? 'right' : 'left' }; cell.border = border; });
     });
-    if (has('sales') && list.length) sm.getCell(4, sc.findIndex(c => c.k === 'share') + 1).note = 'حصة القسم من مجموع المبيعات في هذا التصدير';
+    if (has('sales') && list.length) sm.getCell(3, sc.findIndex(c => c.k === 'share') + 1).note = 'حصة القسم أو العائلة من مجموع المبيعات في هذا الملف';
   }
   return wb.xlsx.writeBuffer();
 }
