@@ -3293,8 +3293,10 @@ class Table {
     this.el.querySelector('.more').innerHTML = v.length > this.lim ? '<button class="btn" type="button">عرض المزيد</button>' : '';
   }
   /** أعمدة التصدير: في جداول الأصناف القسم ← العائلة ← الفرعية أولاً (بدل عمودي القسم/العائلة المعروضين) */
+  /** جدول فيه أقسام (حتى لو قسم واحد بسبب الفلتر) → التصدير بيجمّع حسب القسم */
+  hasHier() { return this.famOn || (this.o.fam !== false && this.rows.some(r => r.f1 != null && r.f1 !== '')); }
   exportCols() {
-    if (!this.famOn) return this.cols;
+    if (!this.hasHier()) return this.cols;
     const hier = ['f1', 'f2', 'f3'].map((k, i) => ({ k, l: FAM_LEVELS[i] || k, f: 'text', hier: true }));
     return [...hier, ...this.cols.filter(c => !['cat', 'fam', 'f1', 'f2', 'f3'].includes(c.k))];
   }
@@ -3311,14 +3313,17 @@ class Table {
       await loadScript('https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js');
       // جداول الأصناف: ترتيب حسب القسم ثم العائلة، مع الحفاظ على ترتيب الجدول داخل كل عائلة
       // الأقسام من الأعلى مبيعاً للأقل، وداخل كل قسم حسب العائلة
-      if (this.famOn) {
+      const hier = this.hasHier();
+      if (hier) {
         const k = v => v == null || v === '' ? '￿' : String(v), ds = new Map();
         for (const x of rows) ds.set(k(x.f1), (ds.get(k(x.f1)) || 0) + (typeof x.sales === 'number' ? x.sales : 0));
         rows = [...rows].sort((a, b) => ds.get(k(b.f1)) - ds.get(k(a.f1)) || k(a.f1).localeCompare(k(b.f1), 'ar') || k(a.f2).localeCompare(k(b.f2), 'ar'));
       }
       const title = this.o.title || this.el.closest('.card')?.querySelector('h3')?.textContent?.trim() || 'جدول';
-      const filters = [this.fam.map((s, i) => s.length ? `${['القسم', 'العائلة', 'الفرعية'][i]}: ${s.join('، ')}` : '').filter(Boolean).join(' · '), this.term ? `بحث: «${this.term}»` : '', Object.keys(this.cf).length ? `فلاتر أعمدة: ${Object.keys(this.cf).map(k => this.cols.find(c => c.k === k)?.l || k).join('، ')}` : ''].filter(Boolean).join(' · ');
-      const buf = await xlsxBook({ title, cols, rows, group: this.famOn, filters });
+      // فلاتر أعلى الصفحة (القسم الرئيسي ← العائلة …) ثم فلاتر الجدول نفسه
+      const top = (S.fam || []).map((s, i) => s.length ? `${FAM_LEVELS[i] || 'القسم'}: ${s.join('، ')}` : '').filter(Boolean).join(' · ');
+      const filters = [top, this.fam.map((s, i) => s.length ? `${['القسم', 'العائلة', 'الفرعية'][i]}: ${s.join('، ')}` : '').filter(Boolean).join(' · '), this.term ? `بحث: «${this.term}»` : '', Object.keys(this.cf).length ? `فلاتر أعمدة: ${Object.keys(this.cf).map(k => this.cols.find(c => c.k === k)?.l || k).join('، ')}` : ''].filter(Boolean).join(' · ');
+      const buf = await xlsxBook({ title, cols, rows, group: hier, filters });
       download(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `زاد مارت - ${title} - ${S.from} إلى ${S.to}.xlsx`);
     } catch (e) {
       console.error(e);
