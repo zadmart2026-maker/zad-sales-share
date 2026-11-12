@@ -3392,7 +3392,7 @@ async function xlsxBook({ title, cols, rows, group, summary, filters }) {
   const wb = new ExcelJS.Workbook(); wb.creator = 'زاد مارت'; wb.created = new Date();
   const font = { name: 'Arial', size: 10 };
   const ws = wb.addWorksheet(title.slice(0, 31).replace(/[\\/*?:\[\]]/g, ' '), { views: [{ rightToLeft: true, showGridLines: false }], properties: { outlineLevelRow: 2 } });
-  ws.properties.outlineProperties = { summaryBelow: true };
+  // ملاحظة: لا تُضبط outlineProperties مع fitToPage — ExcelJS يكتبهما بترتيب خاطئ وExcel يرفض فتح الملف (المجموع تحت هو الافتراضي أصلاً)
   const n = cols.length, sumCols = cols.map(c => XL_SUM.has(c.k) && c.f !== 'text');
   const border = { top: { style: 'thin', color: { argb: XL.line } }, bottom: { style: 'thin', color: { argb: XL.line } }, left: { style: 'thin', color: { argb: XL.line } }, right: { style: 'thin', color: { argb: XL.line } } };
   // الرأس: العنوان ثم معلومات الفترة
