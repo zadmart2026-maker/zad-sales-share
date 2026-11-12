@@ -3221,7 +3221,7 @@ class Table {
     // جداول الأصناف: فلتر متسلسل بالقسم ← العائلة ← الفرعية بجانب البحث
     this.fam = [[], [], []];   // المختار في كل مستوى (اختيار متعدد)
     this.famOn = this.o.fam !== false && attachFam(rows);
-    el.innerHTML = `<div class="tbl-tools"><span class="tbl-filters">${this.o.search ? '<input type="search" placeholder="بحث…">' : ''}${this.famOn ? '<span class="famsel"></span>' : ''}</span><span style="display:flex;gap:8px;align-items:center"><span class="hint cnt"></span><button class="btn hf-clear" type="button" hidden>مسح فلاتر الأعمدة</button><button class="btn exp" type="button">تصدير Excel/CSV</button></span></div><div class="tbl-wrap"></div><div class="more"></div>`;
+    el.innerHTML = `<div class="tbl-tools"><span class="tbl-filters">${this.o.search ? '<input type="search" placeholder="بحث…">' : ''}${this.famOn ? '<span class="famsel"></span>' : ''}</span><span style="display:flex;gap:8px;align-items:center"><span class="hint cnt"></span><button class="btn hf-clear" type="button" hidden>مسح فلاتر الأعمدة</button><button class="btn exp" type="button">تصدير Excel</button></span></div><div class="tbl-wrap"></div><div class="more"></div>`;
     el.querySelector('.hf-clear').addEventListener('click', () => { this.cf = {}; this.lim = this.o.limit; this.render(); });
     el.querySelector('input')?.addEventListener('input', e => { this.term = e.target.value; this.lim = this.o.limit; this.render(); });
     if (this.famOn) this.renderFam();
@@ -3292,13 +3292,39 @@ class Table {
     this.el.querySelector('.hf-clear').hidden = !Object.keys(this.cf).length;
     this.el.querySelector('.more').innerHTML = v.length > this.lim ? '<button class="btn" type="button">عرض المزيد</button>' : '';
   }
-  export() {
-    const rows = this.view();
+  /** أعمدة التصدير: في جداول الأصناف القسم ← العائلة ← الفرعية أولاً (بدل عمودي القسم/العائلة المعروضين) */
+  exportCols() {
+    if (!this.famOn) return this.cols;
+    const hier = ['f1', 'f2', 'f3'].map((k, i) => ({ k, l: FAM_LEVELS[i] || k, f: 'text', hier: true }));
+    return [...hier, ...this.cols.filter(c => !['cat', 'fam', 'f1', 'f2', 'f3'].includes(c.k))];
+  }
+  csvExport(rows, cols) {
     const cell = v => { if (v == null) return ''; const s = typeof v === 'number' ? String(Math.round(v * 10000) / 10000) : String(v); return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
-    // جداول الأصناف: يُضاف القسم والعائلة والفرعية للتصدير
-    const cols = this.famOn ? [...this.cols, ...['f1', 'f2', 'f3'].filter(k => !this.cols.some(c => c.k === k)).map((k, i) => ({ k, l: FAM_LEVELS[i] || k }))] : this.cols;
     const csv = '﻿' + [cols.map(c => cell(c.l)).join(','), ...rows.map(x => cols.map(c => cell(x[c.k])).join(','))].join('\r\n');
     download(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `zadmart-${this.o.name}-${S.from}_${S.to}.csv`);
+  }
+  async export() {
+    const cols = this.exportCols();
+    let rows = this.view();
+    const btn = this.el.querySelector('.exp'); btn.disabled = true; const lbl = btn.textContent; btn.textContent = 'جارٍ التجهيز…';
+    try {
+      await loadScript('https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js');
+      // جداول الأصناف: ترتيب حسب القسم ثم العائلة، مع الحفاظ على ترتيب الجدول داخل كل عائلة
+      // الأقسام من الأعلى مبيعاً للأقل، وداخل كل قسم حسب العائلة
+      if (this.famOn) {
+        const k = v => v == null || v === '' ? '￿' : String(v), ds = new Map();
+        for (const x of rows) ds.set(k(x.f1), (ds.get(k(x.f1)) || 0) + (typeof x.sales === 'number' ? x.sales : 0));
+        rows = [...rows].sort((a, b) => ds.get(k(b.f1)) - ds.get(k(a.f1)) || k(a.f1).localeCompare(k(b.f1), 'ar') || k(a.f2).localeCompare(k(b.f2), 'ar'));
+      }
+      const title = this.o.title || this.el.closest('.card')?.querySelector('h3')?.textContent?.trim() || 'جدول';
+      const filters = [this.fam.map((s, i) => s.length ? `${['القسم', 'العائلة', 'الفرعية'][i]}: ${s.join('، ')}` : '').filter(Boolean).join(' · '), this.term ? `بحث: «${this.term}»` : '', Object.keys(this.cf).length ? `فلاتر أعمدة: ${Object.keys(this.cf).map(k => this.cols.find(c => c.k === k)?.l || k).join('، ')}` : ''].filter(Boolean).join(' · ');
+      const buf = await xlsxBook({ title, cols, rows, group: this.famOn, filters });
+      download(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), `زاد مارت - ${title} - ${S.from} إلى ${S.to}.xlsx`);
+    } catch (e) {
+      console.error(e);
+      alert('تعذّر تجهيز ملف Excel (' + (e.message || e) + '). سيتم التصدير كملف CSV بدلاً منه.');
+      this.csvExport(rows, cols);
+    } finally { btn.disabled = false; btn.textContent = lbl; }
   }
 }
 /* ===== فلتر رأس العمود: قائمة تشيك ليست للأعمدة النصية، ومن/إلى للأعمدة الرقمية ===== */
@@ -3361,6 +3387,96 @@ const HeadFilter = {
 document.addEventListener('mousedown', e => { if (HeadFilter.el && !HeadFilter.el.contains(e.target) && !e.target.closest('.hf')) HeadFilter.close(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') HeadFilter.close(); });
 window.addEventListener('scroll', () => HeadFilter.close(), { passive: true });
+/* ===== تصدير Excel منسّق (ExcelJS): عنوان وفترة، رؤوس ملوّنة، تنسيق أرقام، تجميع حسب القسم مع مجاميع، وورقة ملخص ===== */
+// الأعمدة اللي بتنجمع بمجموع القسم (الباقي معدلات أو نسب ما بتنجمع)
+const XL_SUM = new Set(['sales', 'qty', 'profit', 'rets', 'psales', 'diff', 'share', 'sales_c', 'cost', 'disc', 'value', 'lines']);
+const XL_FMT = { money: '#,##0.00', int: '#,##0', qty: '#,##0.##', num1: '#,##0.0', num2: '#,##0.00', pct: '0.0%', share: '0.00%', delta: '+0.0%;-0.0%;0.0%' };
+const XL = { brand: 'FF9B1C1C', head: 'FF7A1616', headTx: 'FFFFFFFF', band: 'FFF7F5F2', line: 'FFDDD8D0', grp: 'FFF1E4E2', grpTx: 'FF5E1212', tot: 'FFE9DFD0', muted: 'FF6B655E', good: 'FF1E7B45', bad: 'FFB42318' };
+async function xlsxBook({ title, cols, rows, group, filters }) {
+  const wb = new ExcelJS.Workbook(); wb.creator = 'زاد مارت'; wb.created = new Date();
+  const font = { name: 'Arial', size: 10 };
+  const ws = wb.addWorksheet(title.slice(0, 31).replace(/[\\/*?:\[\]]/g, ' '), { views: [{ rightToLeft: true, showGridLines: false }], properties: { outlineLevelRow: 1 } });
+  ws.properties.outlineProperties = { summaryBelow: true };
+  const n = cols.length, sumCols = cols.map(c => XL_SUM.has(c.k) && c.f !== 'text');
+  const border = { top: { style: 'thin', color: { argb: XL.line } }, bottom: { style: 'thin', color: { argb: XL.line } }, left: { style: 'thin', color: { argb: XL.line } }, right: { style: 'thin', color: { argb: XL.line } } };
+  // الرأس: العنوان ثم معلومات الفترة
+  ws.mergeCells(1, 1, 1, n); const t = ws.getCell(1, 1);
+  t.value = `زاد مارت · ${title}`; t.font = { ...font, size: 16, bold: true, color: { argb: XL.brand } }; t.alignment = { horizontal: 'right', vertical: 'middle' }; ws.getRow(1).height = 28;
+  const info = [`الفترة: ${S.from} إلى ${S.to}`, `المبالغ: ${TAX_LBL()} بعد المردودات${S.cur ? ' (' + S.cur + ')' : ''}`, `عدد الصفوف: ${nf(rows.length)}`, `تاريخ التصدير: ${localToday()}`].join('   |   ');
+  ws.mergeCells(2, 1, 2, n); Object.assign(ws.getCell(2, 1), { value: info }); ws.getCell(2, 1).font = { ...font, color: { argb: XL.muted } }; ws.getCell(2, 1).alignment = { horizontal: 'right' };
+  let r0 = 3;
+  if (filters) { ws.mergeCells(3, 1, 3, n); ws.getCell(3, 1).value = 'الفلاتر المطبّقة: ' + filters; ws.getCell(3, 1).font = { ...font, italic: true, color: { argb: XL.muted } }; ws.getCell(3, 1).alignment = { horizontal: 'right' }; r0 = 4; }
+  const hr = r0 + 1, head = ws.getRow(hr);
+  cols.forEach((c, i) => {
+    const cell = head.getCell(i + 1); cell.value = c.l.replace(/<[^>]+>/g, '');
+    cell.font = { ...font, bold: true, color: { argb: XL.headTx } }; cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: XL.head } };
+    cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true }; cell.border = border;
+  });
+  head.height = 30;
+  const put = (row, x, { band, bold, fill, txColor } = {}) => {
+    cols.forEach((c, i) => {
+      const cell = row.getCell(i + 1); let v = x[c.k];
+      if (typeof v === 'number') v = !isFinite(v) ? null : ['pct', 'share', 'delta'].includes(c.f) ? Math.round(v * 1e6) / 1e6 : Math.round(v * 1000) / 1000;
+      cell.value = v == null || v === '' ? null : c.f === 'text' ? String(v) : typeof v === 'number' ? v : Number(v) || String(v);
+      cell.font = { ...font, bold: !!bold, color: txColor ? { argb: txColor } : undefined };
+      if (c.f !== 'text' && XL_FMT[c.f]) cell.numFmt = XL_FMT[c.f];
+      if (c.f === 'delta' && typeof v === 'number' && v) cell.font = { ...cell.font, color: { argb: v > 0 ? XL.good : XL.bad } };
+      if (c.k === 'abc' && v) { cell.alignment = { horizontal: 'center' }; cell.font = { ...cell.font, bold: true, color: { argb: { A: XL.good, B: 'FF9A6400', C: XL.muted }[v] || XL.muted } }; }
+      else cell.alignment = { horizontal: c.f === 'text' ? 'right' : 'left', vertical: 'middle' };
+      if (fill || band) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: fill || XL.band } };
+      cell.border = border;
+    });
+  };
+  const sumRow = (list, label) => { const o = {}; cols.forEach((c, i) => { if (sumCols[i]) o[c.k] = list.reduce((a, x) => a + (typeof x[c.k] === 'number' && isFinite(x[c.k]) ? x[c.k] : 0), 0); }); o[cols[0].k] = label; return o; };
+  let rn = hr, band = false;
+  if (group) {
+    // كل قسم: صف عنوان، ثم أصنافه (قابلة للطي)، ثم صف المجموع
+    const groups = []; for (const x of rows) { const k = x.f1 ?? '(بدون قسم)'; if (!groups.length || groups[groups.length - 1].k !== k) groups.push({ k, items: [] }); groups[groups.length - 1].items.push(x); }
+    for (const g of groups) {
+      const gh = ws.getRow(++rn); ws.mergeCells(rn, 1, rn, n);
+      gh.getCell(1).value = `${g.k} — ${nf(g.items.length)} صنف`; gh.getCell(1).font = { ...font, size: 11, bold: true, color: { argb: XL.grpTx } };
+      gh.getCell(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: XL.grp } }; gh.getCell(1).alignment = { horizontal: 'right', vertical: 'middle' }; gh.height = 20;
+      band = false;
+      for (const x of g.items) { const row = ws.getRow(++rn); put(row, x, { band }); row.outlineLevel = 1; band = !band; }
+      const s = ws.getRow(++rn); put(s, sumRow(g.items, `مجموع ${g.k}`), { bold: true, fill: XL.tot });
+    }
+  } else for (const x of rows) { put(ws.getRow(++rn), x, { band }); band = !band; }
+  if (sumCols.some(Boolean) && rows.length) { const s = ws.getRow(++rn); put(s, sumRow(rows, 'المجموع الكلي'), { bold: true, fill: XL.head, txColor: XL.headTx }); }
+  // عرض الأعمدة حسب المحتوى، تجميد الرأس وأول عمودين نصيين، وفلتر تلقائي
+  cols.forEach((c, i) => {
+    let w = c.l.length + 2;
+    for (const x of rows.slice(0, 3000)) { const v = x[c.k]; const len = v == null ? 0 : c.f === 'text' ? String(v).length : c.f === 'pct' || c.f === 'share' || c.f === 'delta' ? 7 : String(Math.round(Math.abs(v))).length + 4; if (len > w) w = len; }
+    ws.getColumn(i + 1).width = Math.min(c.f === 'text' ? 48 : 18, Math.max(8, w + 1));
+  });
+  ws.views = [{ rightToLeft: true, showGridLines: false, state: 'frozen', ySplit: hr, xSplit: 0 }];
+  ws.autoFilter = { from: { row: hr, column: 1 }, to: { row: hr, column: n } };
+  ws.pageSetup = { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0, paperSize: 9, margins: { left: 0.4, right: 0.4, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 }, printTitlesRow: `${hr}:${hr}` };
+  ws.headerFooter = { oddFooter: `&Rزاد مارت · ${title}&Lصفحة &P من &N` };
+  // ورقة ملخص الأقسام لجداول الأصناف
+  if (group && rows.length) {
+    const sm = wb.addWorksheet('ملخص الأقسام', { views: [{ rightToLeft: true, showGridLines: false, state: 'frozen', ySplit: 3 }] });
+    const has = k => cols.some(c => c.k === k);
+    const sc = [{ k: 'dept', l: 'القسم', f: 'text' }, { k: 'n', l: 'عدد الأصناف', f: 'int' }, ...(has('sales') ? [{ k: 'sales', l: 'المبيعات', f: 'money' }, { k: 'share', l: 'الحصة من المجموع', f: 'pct' }] : []),
+      ...(has('qty') ? [{ k: 'qty', l: 'الكمية', f: 'qty' }] : []), ...(has('profit') ? [{ k: 'profit', l: 'الربح', f: 'money' }, { k: 'margin', l: 'الهامش', f: 'pct' }] : []),
+      ...(has('rets') ? [{ k: 'rets', l: 'المردودات', f: 'money' }] : []), ...(has('psales') ? [{ k: 'psales', l: 'فترة المقارنة', f: 'money' }, { k: 'gr', l: 'التغير', f: 'delta' }] : [])];
+    const m = new Map(); for (const x of rows) { const k = x.f1 ?? '(بدون قسم)'; const o = m.get(k) || m.set(k, { dept: k, n: 0, sales: 0, qty: 0, profit: 0, sales_c: 0, rets: 0, psales: 0 }).get(k); o.n++; for (const f of ['sales', 'qty', 'profit', 'sales_c', 'rets', 'psales']) o[f] += typeof x[f] === 'number' && isFinite(x[f]) ? x[f] : 0; }
+    const list = [...m.values()].sort((a, b) => b.sales - a.sales), tot = list.reduce((a, o) => { for (const f of ['n', 'sales', 'qty', 'profit', 'sales_c', 'rets', 'psales']) a[f] += o[f]; return a; }, { dept: 'المجموع', n: 0, sales: 0, qty: 0, profit: 0, sales_c: 0, rets: 0, psales: 0 });
+    for (const o of [...list, tot]) { o.share = tot.sales ? o.sales / tot.sales : null; o.margin = o.sales_c ? o.profit / o.sales_c : null; o.gr = o.psales ? o.sales / o.psales - 1 : null; }
+    sm.mergeCells(1, 1, 1, sc.length); sm.getCell(1, 1).value = `زاد مارت · ملخص الأقسام — ${S.from} إلى ${S.to}`; sm.getCell(1, 1).font = { ...font, size: 14, bold: true, color: { argb: XL.brand } }; sm.getRow(1).height = 24;
+    sm.mergeCells(2, 1, 2, sc.length); sm.getCell(2, 1).value = `المبالغ ${TAX_LBL()} بعد المردودات${filters ? ' · ' + filters : ''}`; sm.getCell(2, 1).font = { ...font, color: { argb: XL.muted } };
+    sc.forEach((c, i) => { const cell = sm.getRow(3).getCell(i + 1); cell.value = c.l; cell.font = { ...font, bold: true, color: { argb: XL.headTx } }; cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: XL.head } }; cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true }; cell.border = border; sm.getColumn(i + 1).width = c.f === 'text' ? 30 : 16; });
+    sm.getRow(3).height = 28;
+    [...list, tot].forEach((o, j) => {
+      const row = sm.getRow(4 + j), last = o === tot;
+      sc.forEach((c, i) => { const cell = row.getCell(i + 1); let v = o[c.k]; if (typeof v === 'number') v = !isFinite(v) ? null : ['pct', 'delta'].includes(c.f) ? Math.round(v * 1e6) / 1e6 : Math.round(v * 1000) / 1000; cell.value = v == null ? null : v; if (c.f !== 'text') cell.numFmt = XL_FMT[c.f];
+        cell.font = { ...font, bold: last, color: last ? { argb: XL.headTx } : c.f === 'delta' && v ? { argb: v > 0 ? XL.good : XL.bad } : undefined };
+        cell.fill = last ? { type: 'pattern', pattern: 'solid', fgColor: { argb: XL.head } } : j % 2 ? { type: 'pattern', pattern: 'solid', fgColor: { argb: XL.band } } : undefined;
+        cell.alignment = { horizontal: c.f === 'text' ? 'right' : 'left' }; cell.border = border; });
+    });
+    if (has('sales') && list.length) sm.getCell(4, sc.findIndex(c => c.k === 'share') + 1).note = 'حصة القسم من مجموع المبيعات في هذا التصدير';
+  }
+  return wb.xlsx.writeBuffer();
+}
 function download(blob, name) {
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
   document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
