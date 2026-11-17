@@ -841,6 +841,8 @@ async function initDB() {
   // أسطر البيع التي كانت على عرض أو هدية أو خصم، مجمّعة يومياً لكل صنف وعرض (المبالغ شاملة الضريبة كما في Solid Soft)
   await q(`CREATE TABLE IF NOT EXISTS offday(${Object.entries(OFFDAY_COLS).map(([k, v]) => `${k} ${v}`).join(', ')})`);
   await q(`CREATE TABLE IF NOT EXISTS pos_users(usr VARCHAR, name VARCHAR)`);
+  // كل باركود ← بطاقة الصنف (رمز المادة) في Solid Soft: الصنف الواحد قد يكون له عدة باركودات (أوزان الميزان، الكرتونة…)
+  await q(`CREATE TABLE IF NOT EXISTS card_map(code VARCHAR, card VARCHAR)`);
   // جداول مرجعية من قاعدة البيانات: المخزون، الموردون، المشتريات (تُستبدل كاملة عند كل تحديث لملفها)
   for (const r of REF_TABLES) await q(`CREATE TABLE IF NOT EXISTS ${r.t}(${Object.entries(r.cols).map(([k, v]) => `${k} ${v}`).join(', ')})`);
 }
@@ -1029,6 +1031,15 @@ async function makeView() {
       UNION ALL SELECT sc.code, mn.f1, mn.f2, mn.f3, mn.f4, mn.f5 FROM sc JOIN mn ON mn.n = sc.n WHERE sc.code NOT IN (SELECT code FROM mc)`);
     // نسخة في الذاكرة لفلتر العائلات في جداول الأصناف (attachFam)
     FAMOF = new Map((await q(`SELECT code, ANY_VALUE(f1) AS f1, ANY_VALUE(f2) AS f2, ANY_VALUE(f3) AS f3 FROM fam_map GROUP BY code`)).map(r => [r.code, r]));
+    // تجميع الباركودات تحت بطاقة الصنف مثل تقارير النظام: كل باركود يُستبدل بالباركود الرئيسي لبطاقته
+    // (باركود البطاقة في جدول المخزون، وإلا أصغر باركود فيها) — فتظهر كل شاشات اللوحة بالصنف وليس بالباركود
+    await q(`CREATE OR REPLACE TABLE code_rep AS
+      WITH st AS (SELECT item_code AS card, ANY_VALUE(code) AS code FROM stock WHERE NULLIF(item_code, '') IS NOT NULL GROUP BY 1),
+      mn AS (SELECT card, MIN(code) AS code FROM card_map GROUP BY card)
+      SELECT c.code, c.card, COALESCE(st.code, mn.code) AS rep FROM card_map c JOIN mn USING (card) LEFT JOIN st USING (card)`);
+    S.cards = (await q(`SELECT COUNT(*) n FROM code_rep`))[0].n > 0;
+    await q(`CREATE OR REPLACE VIEW offday_v AS SELECT o.* REPLACE (COALESCE(r.rep, o.code) AS code) FROM offday o LEFT JOIN code_rep r ON r.code = o.code`);
+    await q(`CREATE OR REPLACE VIEW deleted_v AS SELECT x.* REPLACE (COALESCE(r.rep, x.code) AS code) FROM deleted x LEFT JOIN code_rep r ON r.code = x.code`);
     S.famDirty = false;
   }
   // مع وجود دليل بعائلات: الأصناف غير الموجودة فيه تُجمع تحت قسم واحد، وتحتها قسمها التقديري
@@ -1036,7 +1047,8 @@ async function makeView() {
   await q(`CREATE OR REPLACE VIEW sv AS
     SELECT x.* REPLACE (CASE WHEN h.code IS NOT NULL THEN h.f1 ELSE ${miss} END AS cat),
       CASE WHEN h.code IS NOT NULL THEN h.f1 ELSE ${miss} END AS f1, CASE WHEN h.code IS NOT NULL THEN h.f2 ELSE ${missF2} END AS f2, h.f3, h.f4, h.f5
-    FROM (SELECT * ${S.net ? 'REPLACE (amount - COALESCE(tax, 0) AS amount)' : ''}, CAST(ts - INTERVAL ${S.cutoff} HOUR AS DATE) AS d, sales.amount AS amt_incl FROM sales) x
+    FROM (SELECT s.* REPLACE (COALESCE(r.rep, s.code) AS code${S.net ? ', s.amount - COALESCE(s.tax, 0) AS amount' : ''}), s.code AS bar, r.card,
+        CAST(s.ts - INTERVAL ${S.cutoff} HOUR AS DATE) AS d, s.amount AS amt_incl FROM sales s LEFT JOIN code_rep r ON r.code = s.code) x
     LEFT JOIN fam_map h ON h.code = x.code`);
 }
 /** ترتيب الساعات حسب يوم العمل: 07 … 23، ثم 00 … 03 */
@@ -1384,7 +1396,7 @@ $('#deadDays').addEventListener('change', async () => { busy('جارٍ التح�
 let ITEMS = [];
 async function renderItems() {
   $('#itProfitBtn').hidden = !S.flags.cost;
-  ITEMS = await q(`WITH t AS (SELECT code, ANY_VALUE(name) AS name, ANY_VALUE(cat) AS cat, ANY_VALUE(COALESCE(f5, f4, f3, f2)) AS fam, SUM(qty)::DOUBLE qty, SUM(amount)::DOUBLE sales, COALESCE(SUM(-amount) FILTER (WHERE amount < 0), 0)::DOUBLE rets, COUNT(DISTINCT inv) FILTER (WHERE inv NOT LIKE 'R|%') invs,
+  ITEMS = await q(`WITH t AS (SELECT code, ANY_VALUE(card) AS card, ANY_VALUE(name) AS name, ANY_VALUE(cat) AS cat, ANY_VALUE(COALESCE(f5, f4, f3, f2)) AS fam, SUM(qty)::DOUBLE qty, SUM(amount)::DOUBLE sales, COALESCE(SUM(-amount) FILTER (WHERE amount < 0), 0)::DOUBLE rets, COUNT(DISTINCT inv) FILTER (WHERE inv NOT LIKE 'R|%') invs,
       SUM(CASE WHEN line_cost IS NOT NULL THEN ${NETAMT()}-line_cost END)::DOUBLE profit, SUM(CASE WHEN line_cost IS NOT NULL THEN ${NETAMT()} END)::DOUBLE sales_c FROM cur GROUP BY code),
     p AS (SELECT code, SUM(amount)::DOUBLE psales, SUM(qty)::DOUBLE pqty FROM prv GROUP BY code),
     tot AS (SELECT SUM(amount)::DOUBLE s, COUNT(DISTINCT inv) FILTER (WHERE inv NOT LIKE 'R|%')::DOUBLE n FROM cur)
@@ -1418,7 +1430,8 @@ async function renderItems() {
   });
   drawMovers();
   new Table($('#tblItems'), [
-    { k: 'code', l: 'الرمز', f: 'text' }, { k: 'name', l: 'الصنف', f: 'text' }, { k: 'cat', l: S.hasFam ? 'القسم الرئيسي' : 'القسم', f: 'text' }, ...(S.hasFam ? [{ k: 'fam', l: 'العائلة', f: 'text' }] : []),
+    ...(S.cards ? [{ k: 'card', l: 'رمز المادة', f: 'text', title: 'رقم بطاقة الصنف في Solid Soft — كل باركودات الصنف مجمّعة تحته مثل تقارير النظام' }] : []),
+    { k: 'code', l: S.cards ? 'الباركود' : 'الرمز', f: 'text' }, { k: 'name', l: 'الصنف', f: 'text' }, { k: 'cat', l: S.hasFam ? 'القسم الرئيسي' : 'القسم', f: 'text' }, ...(S.hasFam ? [{ k: 'fam', l: 'العائلة', f: 'text' }] : []),
     { k: 'sales', l: 'المبيعات', f: 'money' }, { k: 'share', l: 'الحصة', f: 'share' }, { k: 'qty', l: 'الكمية', f: 'qty' },
     { k: 'invs', l: 'عدد الفواتير', f: 'int' }, { k: 'pen', l: 'نسبة الانتشار', f: 'pct', title: 'نسبة الفواتير التي احتوت الصنف' },
     { k: 'avgp', l: 'متوسط السعر', f: 'money' },
@@ -1768,10 +1781,15 @@ async function renderExpiry() {
   const info = new Map();
   if (all.length) {
     const codes = all.map(lit).join(', '), mx = S.maxDate;
+    // الباركود الممسوح قد يكون باركوداً ثانوياً للصنف: يُحوَّل للباركود الرئيسي لبطاقته (المبيعات مجمّعة عليه)
+    const rep = new Map((await q(`SELECT code, rep FROM code_rep WHERE code IN (${codes})`)).map(r => [r.code, r.rep]));
+    const reps = [...new Set(all.map(c => rep.get(c) || c))].map(lit).join(', ');
+    const byRep = new Map();
     for (const r of await q(`SELECT code, ANY_VALUE(name) AS name, ANY_VALUE(f1) AS f1,
         COALESCE(SUM(qty) FILTER (WHERE d > DATE '${mx}' - INTERVAL 28 DAY), 0)::DOUBLE / 28 AS rate,
         (SUM(line_cost) FILTER (WHERE d > DATE '${mx}' - INTERVAL 90 DAY AND qty > 0 AND line_cost IS NOT NULL) / NULLIF(SUM(qty) FILTER (WHERE d > DATE '${mx}' - INTERVAL 90 DAY AND qty > 0 AND line_cost IS NOT NULL), 0))::DOUBLE AS ucost
-        FROM sv WHERE code IN (${codes}) GROUP BY code`)) info.set(r.code, r);
+        FROM sv WHERE code IN (${reps}) GROUP BY code`)) byRep.set(r.code, r);
+    for (const c of all) { const r = byRep.get(rep.get(c) || c); if (r) info.set(c, { ...r, code: c }); }
     for (const r of await q(`SELECT code, ANY_VALUE(name) AS name, ANY_VALUE(l1) AS f1 FROM items_master WHERE code IN (${codes}) GROUP BY code`))
       if (!info.has(r.code)) info.set(r.code, { ...r, rate: 0, ucost: null });
   }
@@ -2885,7 +2903,7 @@ function offerVerdict(r) {
 async function offerItemStats() {
   await q(`CREATE OR REPLACE TABLE of_win AS SELECT offer, code, MIN(date) AS f, MAX(date) AS l, SUM(qty) AS uo, SUM(net${OFK()})::DOUBLE AS so,
       SUM((before - net)${OFK()})::DOUBLE AS dsc, SUM(net${OF_BT} - cost)::DOUBLE AS po, SUM(net${OF_BT})::DOUBLE AS sbt
-    FROM offday WHERE is_offer = 1 AND offer <> '0' AND ${ofWhere()} GROUP BY 1, 2`);
+    FROM offday_v WHERE is_offer = 1 AND offer <> '0' AND ${ofWhere()} GROUP BY 1, 2`);
   const rng = (await q(`SELECT strftime(MIN(f) - INTERVAL 28 DAY, '%Y-%m-%d') AS a, strftime(MAX(l) + INTERVAL 14 DAY, '%Y-%m-%d') AS b FROM of_win`))[0];
   if (!rng.a) return [];
   await q(`CREATE OR REPLACE TABLE of_dd AS SELECT code, d, SUM(qty) AS u, SUM(CASE WHEN line_cost IS NOT NULL THEN ${NETAMT()} - line_cost END)::DOUBLE AS p
@@ -3019,12 +3037,12 @@ async function renderOffers() {
   // الخصومات اليدوية والهدايا حسب الصنف
   const nm = `(SELECT code, ANY_VALUE(name) AS name FROM items_master WHERE name IS NOT NULL GROUP BY code)`;
   const man = await q(`SELECT o.code, COALESCE(m.name, o.code) AS name, SUM(o.lines) AS lines, SUM(o.qty) AS qty, SUM((o.before - o.net)${k})::DOUBLE AS d, SUM(o.net${k})::DOUBLE AS s
-    FROM offday o LEFT JOIN ${nm} m USING (code) WHERE o.is_offer = 0 AND o.gift = 0 AND o.before > o.net AND ${ofWhere().replace(/\bdate\b/, 'o.date').replace('code IN', 'o.code IN')} GROUP BY 1, 2 ORDER BY d DESC`);
+    FROM offday_v o LEFT JOIN ${nm} m USING (code) WHERE o.is_offer = 0 AND o.gift = 0 AND o.before > o.net AND ${ofWhere().replace(/\bdate\b/, 'o.date').replace('code IN', 'o.code IN')} GROUP BY 1, 2 ORDER BY d DESC`);
   new Table($('#tblOfDisc'), [
     { k: 'name', l: 'الصنف', f: 'text' }, { k: 'lines', l: 'مرات', f: 'int' }, { k: 'qty', l: 'الكمية', f: 'qty' }, { k: 'd', l: 'الخصم', f: 'money' }, { k: 's', l: 'بيع بعد الخصم', f: 'money' },
   ], man, { limit: 10, search: true, name: 'manual-discounts', sortK: null, empty: 'لا توجد خصومات يدوية 👍' });
   const gifts = await q(`SELECT o.code, COALESCE(m.name, o.code) AS name, SUM(o.qty) AS qty, SUM(o.before${k})::DOUBLE AS v, SUM(o.cost)::DOUBLE AS c
-    FROM offday o LEFT JOIN ${nm} m USING (code) WHERE o.gift = 1 AND ${ofWhere().replace(/\bdate\b/, 'o.date').replace('code IN', 'o.code IN')} GROUP BY 1, 2 ORDER BY v DESC`);
+    FROM offday_v o LEFT JOIN ${nm} m USING (code) WHERE o.gift = 1 AND ${ofWhere().replace(/\bdate\b/, 'o.date').replace('code IN', 'o.code IN')} GROUP BY 1, 2 ORDER BY v DESC`);
   new Table($('#tblOfGift'), [
     { k: 'name', l: 'الصنف', f: 'text' }, { k: 'qty', l: 'الكمية', f: 'qty' }, { k: 'v', l: 'قيمتها بسعر البيع', f: 'money' }, { k: 'c', l: 'كلفتها', f: 'money' },
   ], gifts, { limit: 10, search: true, name: 'gifts', sortK: null, empty: 'لا توجد هدايا في هذه الفترة' });
@@ -3061,7 +3079,8 @@ async function renderVoids() {
     iv AS (SELECT inv, cashier AS pos, MIN(ts) AS its FROM sales WHERE inv NOT LIKE 'R|%'
       AND ts BETWEEN TIMESTAMP '${S.from}' - INTERVAL 1 DAY AND TIMESTAMP '${S.to}' + INTERVAL 2 DAY GROUP BY 1, 2),
     x AS (SELECT dd.*, CASE WHEN iv.its <= dd.ts + INTERVAL 10 MINUTE THEN iv.inv END AS nxt FROM dd ASOF LEFT JOIN iv ON dd.pos = iv.pos AND dd.ts <= iv.its)
-    SELECT x.*, x.nxt IS NOT NULL AND EXISTS (SELECT 1 FROM sales s WHERE s.inv = x.nxt AND s.code = x.code) AS readded FROM x`);
+    SELECT x.* REPLACE (COALESCE(r.rep, x.code) AS code), x.nxt IS NOT NULL AND EXISTS (SELECT 1 FROM sales s WHERE s.inv = x.nxt AND s.code = x.code) AS readded
+    FROM x LEFT JOIN code_rep r ON r.code = x.code`);
   const kp = async (from, to, tbl) => (await q(`WITH g AS (SELECT * FROM ${tbl} WHERE NOT ${DEL_BAD}${tbl === 'deleted' ? ' AND ' + vdWhere(from, to) : ''}),
       i AS (SELECT COUNT(DISTINCT inv) AS invs, SUM(amt_incl)::DOUBLE AS sales FROM sv WHERE ${invWhere(from, to)})
     SELECT (SELECT COUNT(*) FROM g) AS n, (SELECT COALESCE(SUM(qty * price), 0)::DOUBLE FROM g) AS v,
@@ -3712,6 +3731,15 @@ function catSQL(nameExpr) {
 /* ---- دليل الأصناف (المجموعات والتكلفة) — يُحفظ في المتصفح ويُطبّق على كل استيراد ---- */
 // الدليل يُحفظ في IndexedDB (يتسع لعشرات آلاف الأصناف مع العائلات). النسخ القديمة كانت في localStorage.
 async function loadMasterFromStore() {
+  // باركود ← بطاقة الصنف المحفوظة
+  try {
+    const cp = await IDB.get('cardPq');
+    if (cp) {
+      await S.db.registerFileBuffer('zad_card_r.parquet', new Uint8Array(cp));
+      await q(`DELETE FROM card_map`); await q(`INSERT INTO card_map SELECT code, card FROM read_parquet('zad_card_r.parquet')`);
+      await S.db.dropFile('zad_card_r.parquet');
+    }
+  } catch (e) { console.error(e); }
   // نسخة جاهزة أسرع بكثير من إدخال عشرات آلاف الأصناف سطراً سطراً عند كل فتح
   try {
     const pq = await IDB.get('masterPq');
@@ -4174,6 +4202,11 @@ async function syncMaster(itemsFile, famFile) {
     FROM read_csv('sync_items.csv', header = true, quote = '"', columns = {'code': 'VARCHAR', 'item_code': 'VARCHAR', 'name': 'VARCHAR', 'fam': 'VARCHAR', 'unit': 'INTEGER', 'price': 'DOUBLE', 'wacost': 'DOUBLE', 'active': 'INTEGER'}) i
     ${lv.map(n => `LEFT JOIN sync_fam f${n} ON length(trim(i.fam)) >= ${2 * n} AND f${n}.fam = left(trim(i.fam), ${2 * n})`).join(' ')}
     WHERE NULLIF(trim(i.code), '') IS NOT NULL`);
+  // باركود ← بطاقة الصنف (لتجميع الباركودات تحت الصنف مثل تقارير النظام)
+  await q(`CREATE OR REPLACE TABLE card_map AS SELECT DISTINCT trim(code) AS code, trim(item_code) AS card
+    FROM read_csv('sync_items.csv', header = true, quote = '"', columns = {'code': 'VARCHAR', 'item_code': 'VARCHAR', 'name': 'VARCHAR', 'fam': 'VARCHAR', 'unit': 'INTEGER', 'price': 'DOUBLE', 'wacost': 'DOUBLE', 'active': 'INTEGER'})
+    WHERE NULLIF(trim(code), '') IS NOT NULL AND NULLIF(trim(item_code), '') IS NOT NULL`);
+  try { await IDB.set('cardMap', (await q(`SELECT code, card FROM card_map`)).map(r => [r.code, r.card])); } catch (e) { console.error(e); }
   await q(`DROP TABLE sync_fam`);
   for (const f of ['sync_items.csv', 'sync_fam.csv']) try { await S.db.dropFile(f); } catch {}
   const packed = rows.map(r => [r.code, r.name, r.l1, null, r.l1, r.l2, r.l3, r.l4, r.l5]);
@@ -4224,7 +4257,8 @@ async function runSync(interactive) {
   busy(full ? 'جارٍ تحميل كل البيانات من قاعدة البيانات…' : `جارٍ تحديث ${changed.length} ملف من قاعدة البيانات…`);
   const reg = [];
   try {
-    if (files['items.csv.gz'] && (full || changed.includes('items.csv.gz') || changed.includes('families.csv.gz'))) await syncMaster(files['items.csv.gz'], files['families.csv.gz']);
+    const noCards = !(await q(`SELECT COUNT(*) n FROM card_map`))[0].n;
+    if (files['items.csv.gz'] && (full || noCards || changed.includes('items.csv.gz') || changed.includes('families.csv.gz'))) await syncMaster(files['items.csv.gz'], files['families.csv.gz']);
     // أسماء مستخدمي الكاش (للكاشير الذي أصدر الفاتورة أو مسح الصنف، والمشرف الذي وافق)
     const noUsers = !(await q(`SELECT COUNT(*) n FROM pos_users`))[0].n;
     if (files['users.csv.gz'] && (full || noUsers || changed.includes('users.csv.gz'))) {
@@ -4245,6 +4279,7 @@ async function runSync(interactive) {
       try { await S.db.dropFile(`sync_${r.t}.csv`); } catch {}
       // التواريخ الفارغة في Solid Soft تأتي 1900-01-01
       if (r.t === 'stock') {
+        S.famDirty = true;   // الباركود الرئيسي لكل بطاقة يُؤخذ من المخزون
         await q(`UPDATE stock SET last_rec = CASE WHEN last_rec < DATE '2000-01-01' THEN NULL ELSE last_rec END, last_purch = CASE WHEN last_purch < DATE '2000-01-01' THEN NULL ELSE last_purch END,
           last_sale = CASE WHEN last_sale < DATE '2000-01-01' THEN NULL ELSE last_sale END`);
         S.stockAt = new Date(f.lastModified).toISOString();
@@ -4395,8 +4430,9 @@ async function buildFromFiles(list, ch = null) {
   // التحديث الجزئي يتم في الخلفية؛ البناء الكامل (أول مرة فقط) يعرض رسالة انتظار
   if (ch) { S.quiet = true; $('#status').textContent = 'جارٍ تطبيق البيانات الجديدة…'; } else busy('جارٍ تجهيز البيانات… قد يأخذ دقيقة في المرة الأولى');
   try {
-    // دليل الأصناف والعائلات
-    if (!ch || ch.master) {
+    // دليل الأصناف والعائلات (ويُعاد بناؤه مرة إذا كان ربط الباركود ببطاقة الصنف ناقصاً من نسخة قديمة)
+    const noCards = !(await q(`SELECT COUNT(*) n FROM card_map`))[0].n;
+    if (!ch || ch.master || noCards) {
       const fam = await load('families'), items = await load('items');
       const names = new Map(fam.length ? (await q(`SELECT trim(fam) AS fam, trim(name) AS name FROM read_csv([${fam.join(', ')}], header = true, quote = '"', columns = {'fam': 'VARCHAR', 'name': 'VARCHAR', 'level': 'INTEGER'})`)).map(r => [r.fam, r.name]) : []);
       const rows = items.length ? await q(`SELECT trim(code) AS code, NULLIF(trim(name), '') AS name, trim(fam) AS fam
@@ -4406,6 +4442,13 @@ async function buildFromFiles(list, ch = null) {
       const packed = rows.map(r => { const lv = [2, 4, 6, 8, 10].map(n => r.fam && r.fam.length >= n ? names.get(r.fam.slice(0, n)) ?? null : null); return [r.code, r.name, lv[0], null, ...lv]; });
       await fillMaster(packed);
       await persistTable('items_master', 'masterPq');
+      // باركود ← بطاقة الصنف (لتجميع الباركودات تحت الصنف مثل تقارير النظام)
+      await q(`DELETE FROM card_map`);
+      if (items.length) await q(`INSERT INTO card_map SELECT DISTINCT trim(code), trim(item_code)
+        FROM read_csv([${items.join(', ')}], header = true, quote = '"', columns = {'code': 'VARCHAR', 'item_code': 'VARCHAR', 'name': 'VARCHAR', 'fam': 'VARCHAR', 'unit': 'INTEGER', 'price': 'DOUBLE', 'wacost': 'DOUBLE', 'active': 'INTEGER'})
+        WHERE NULLIF(trim(code), '') IS NOT NULL AND NULLIF(trim(item_code), '') IS NOT NULL`);
+      await persistTable('card_map', 'cardPq');
+      S.famDirty = true;
     }
     // مستخدمو الكاش
     if (!ch || ch.users) {
@@ -4419,6 +4462,7 @@ async function buildFromFiles(list, ch = null) {
     for (const r of REF_TABLES) {
       const [ds, rx] = refs[r.t];
       if (ch && !ch.refs.has(ds)) continue;
+      if (r.t === 'stock') S.famDirty = true;   // الباركود الرئيسي لكل بطاقة يُؤخذ من المخزون
       await q(`DELETE FROM ${r.t}`);
       const files = await load(ds, rx);
       if (files.length) await q(`INSERT INTO ${r.t} SELECT * FROM read_csv([${files.join(', ')}], header = true, quote = '"', columns = ${csvCols(r.cols)})`);
