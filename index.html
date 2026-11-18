@@ -259,6 +259,7 @@ tbody tr.drill td:first-child::after{content:" ‹";color:var(--muted)}
       <button class="btn primary" id="btnImport" hidden disabled>استيراد بيانات المبيعات</button>
       <button class="btn" id="btnSync" disabled title="يجلب آخر البيانات التي رفعها جهاز الشبكة">⟳ تحديث البيانات</button>
       <button class="btn" id="btnDemo" hidden disabled>بيانات تجريبية</button>
+      <button class="btn" id="btnMgmt" disabled title="تقرير أسبوعي أو شهري للإدارة: المبيعات، الفواتير، متوسط الفاتورة، المردودات، الاتجاه، الأونلاين وطلبات — للطباعة أو الحفظ PDF">📊 تقرير الإدارة</button>
       <button class="btn" id="btnReport" disabled title="صفحة واحدة بالأرقام الأساسية والتنبيهات (يومي، أسبوعي، شهري، ربع ونصف سنوي، سنوي) — للطباعة أو الحفظ PDF">🖨 تقرير مطبوع</button>
       <button class="btn" id="btnSave" hidden disabled title="يحفظ كل البيانات المحمّلة في ملف مضغوط يُفتح بسرعة في المرة القادمة">حفظ نسخة سريعة</button>
       <button class="btn" id="btnPerms" hidden title="من يرى ماذا">👥 الصلاحيات</button>
@@ -730,6 +731,11 @@ tbody tr.drill td:first-child::after{content:" ‹";color:var(--muted)}
 <dialog id="dlgReport" style="width:min(440px,calc(100vw - 32px))">
   <form method="dialog" class="dlg">
     <h2>التقرير المطبوع</h2>
+    <label style="display:flex;flex-direction:column;gap:4px">لمن التقرير
+      <select id="rpStyle">
+        <option value="mgmt">للإدارة — المبيعات والفواتير والمردودات والاتجاه والأونلاين</option>
+        <option value="ops">تشغيلي — مع النفاد والخسائر والممسوح عن الكاش</option>
+      </select></label>
     <label style="display:flex;flex-direction:column;gap:4px">نوع التقرير
       <select id="rpType">
         <option value="day">يومي — مقارنة بنفس اليوم من الأسبوع الماضي</option>
@@ -2727,6 +2733,12 @@ $('#btnReport').onclick = () => {
   $('#rpDate').min = S.minDate; $('#rpDate').max = S.maxDate; $('#rpDate').value = maxS(rpDefaultDate($('#rpType').value), S.minDate);
   rpHint(); $('#dlgReport').showModal();
 };
+// تقرير الإدارة: نفس النافذة مضبوطة على «للإدارة»، وأسبوعي إن كان النوع المختار يومياً
+$('#btnMgmt').onclick = () => {
+  $('#rpStyle').value = 'mgmt';
+  if (!['week', 'month', 'quarter', 'half', 'year'].includes($('#rpType').value)) $('#rpType').value = 'week';
+  $('#btnReport').onclick();
+};
 $('#rpType').addEventListener('change', () => { $('#rpDate').value = maxS(rpDefaultDate($('#rpType').value), S.minDate); rpHint(); });
 $('#rpDate').addEventListener('change', rpHint);
 $('#dlgReport').addEventListener('close', () => { if ($('#dlgReport').returnValue === 'ok') buildReport(); });
@@ -2744,9 +2756,105 @@ function rpBars(labels, cur, prev) {
       + `<text x="${x + bw / 2}" y="${H - 4}" font-size="9" text-anchor="middle" fill="#555">${esc(l)}</text>`;
   }).join('') + `</svg>`;
 }
+/* ---- تقرير الإدارة: المبيعات، الفواتير، متوسط الفاتورة، المردودات، الاتجاه، الأونلاين وطلبات ---- */
+/** الفترات السابقة لرسم الاتجاه: يومي 14 يوماً، أسبوعي 8 أسابيع، شهري 6 أشهر، ربعي/نصفي 4، سنوي 3 */
+function mgTrendWindows(r) {
+  const { t, a, b } = r, out = [];
+  if (t === 'day') for (let k = 13; k >= 0; k--) { const x = addDays(b, -k); out.push({ a: x, b: x, l: `${+x.slice(8)}/${+x.slice(5, 7)}` }); }
+  else if (t === 'week') for (let k = 7; k >= 0; k--) { const y = addDays(b, -7 * k), x = addDays(y, -6); out.push({ a: x, b: y, l: `${+x.slice(8)}/${+x.slice(5, 7)}–${+y.slice(8)}/${+y.slice(5, 7)}` }); }
+  else {
+    const m = RP[t].m, n = { month: 6, quarter: 4, half: 4, year: 3 }[t];
+    for (let k = n - 1; k >= 0; k--) {
+      const x = shiftYM(a.slice(0, 7), -m * k) + '-01', y = k ? monthEnd(shiftYM(x.slice(0, 7), m - 1) + '-01') : b;
+      const l = t === 'month' ? `${AR_MONTHS[+x.slice(5, 7) - 1]} ${x.slice(2, 4)}` : t === 'year' ? x.slice(0, 4)
+        : t === 'quarter' ? `ر${Math.floor((+x.slice(5, 7) - 1) / 3) + 1} ${x.slice(0, 4)}` : `ن${+x.slice(5, 7) === 1 ? 1 : 2} ${x.slice(0, 4)}`;
+      out.push({ a: x, b: y, l: l + (y !== monthEnd(y) || (k === 0 && y < monthEnd(shiftYM(x.slice(0, 7), m - 1) + '-01')) ? ' *' : '') });
+    }
+  }
+  return out.filter(w => w.b >= S.minDate);
+}
+/** أعمدة الاتجاه مع القيمة فوق كل عمود؛ آخر عمود (الفترة الحالية) بلون مميز */
+function mgBars(labels, vals) {
+  const W = 680, H = 150, top = 16, bot = 30, n = labels.length, max = Math.max(1, ...vals), bw = (W - 10) / n;
+  const y = v => H - bot - (v / max) * (H - bot - top);
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" style="direction:ltr">` + labels.map((l, i) => {
+    const x = 5 + i * bw, last = i === n - 1;
+    return `<rect x="${x + bw * 0.18}" y="${y(vals[i])}" width="${bw * 0.64}" height="${Math.max(0, H - bot - y(vals[i]))}" fill="${last ? '#2f6fd6' : '#9fb6dd'}" rx="2"/>`
+      + `<text x="${x + bw / 2}" y="${y(vals[i]) - 4}" font-size="10" text-anchor="middle" fill="#222" font-weight="${last ? 700 : 400}">${abbr(vals[i])}</text>`
+      + `<text x="${x + bw / 2}" y="${H - bot + 13}" font-size="9" text-anchor="middle" fill="#555">${esc(l)}</text>`;
+  }).join('') + `</svg>`;
+}
+async function buildMgmtReport(r0) {
+  const { t, a, b, pa, pb } = r0;
+  const W = (x, y) => `d BETWEEN DATE '${x}' AND DATE '${y}'`, SALE = `inv NOT LIKE 'R|%'`, RET = `inv LIKE 'R|%'`, ON = `cashier = 'ONLINE'`;
+  const kp = async (x, y) => (await q(`SELECT COALESCE(SUM(amount) FILTER (WHERE ${SALE}), 0)::DOUBLE AS s, COALESCE(-SUM(amount) FILTER (WHERE ${RET}), 0)::DOUBLE AS r,
+      COUNT(DISTINCT inv) FILTER (WHERE ${SALE}) AS n, COUNT(DISTINCT d) AS days,
+      COALESCE(SUM(amount) FILTER (WHERE ${SALE} AND ${ON}), 0)::DOUBLE AS os, COALESCE(-SUM(amount) FILTER (WHERE ${RET} AND ${ON}), 0)::DOUBLE AS orr,
+      COUNT(DISTINCT inv) FILTER (WHERE ${SALE} AND ${ON}) AS on_n, COUNT(cashier) AS hasc FROM sv WHERE ${W(x, y)}`))[0];
+  const c = await kp(a, b), p0 = await kp(pa, pb);
+  if (!c.n) { toast('لا توجد مبيعات في هذه الفترة.'); return; }
+  const hasP = p0.n > 0 && p0.days >= c.days * 0.7, p = hasP ? p0 : null, cmpTxt = RP[t].cmp;
+  const m = o => o && { net: o.s - o.r, n: o.n, avg: o.n ? o.s / o.n : null, r: o.r, rr: o.s ? o.r / o.s : null, daily: o.days ? (o.s - o.r) / o.days : null,
+    on: o.os - o.orr, onN: o.on_n, onAvg: o.on_n ? o.os / o.on_n : null, onSh: o.s - o.r ? (o.os - o.orr) / (o.s - o.r) : null };
+  // قسم الأونلاين يظهر فقط إن كان رقم الكاشير متوفراً وفيه طلبات أونلاين في الفترة أو فترة المقارنة
+  const C = m(c), P = m(p), hasOn = c.hasc > 0 && (c.on_n > 0 || p0.on_n > 0);
+  const ch = (v, pv) => pv ? (v - pv) / Math.abs(pv) : null;
+  const dl = (v, pv, inv = false) => { const d = hasP ? ch(v, pv) : null; if (d == null || !isFinite(d)) return '<span class="note">—</span>';
+    return `<span class="${Math.abs(d) < 0.0005 ? '' : (inv ? d < 0 : d > 0) ? 'up' : 'dn'}">${d > 0 ? '▲' : d < 0 ? '▼' : '■'} ${nf(Math.abs(d) * 100, 1)}%</span>`; };
+  const pv = (v, f) => hasP && v != null ? f(v) : '—';
+  const tile = (l, v, cur, prev, f, inv) => [l, v, `${dl(cur, prev, inv)} · ${cmpTxt}: ${pv(prev, f)}`];
+  const kpis = [
+    tile('المبيعات ' + TAX_LBL(), F.money(C.net), C.net, P?.net, F.money),
+    tile('عدد الفواتير', F.int(C.n), C.n, P?.n, F.int),
+    tile('متوسط الفاتورة', F.money(C.avg), C.avg, P?.avg, F.money),
+    tile('المردودات', F.money(C.r), C.r, P?.r, F.money, true),
+    tile('متوسط المبيعات اليومية', F.money(C.daily), C.daily, P?.daily, F.money),
+    ...(hasOn ? [tile('الأونلاين وطلبات', F.money(C.on), C.on, P?.on, F.money)] : []),
+  ];
+  // الاتجاه
+  const wins = mgTrendWindows(r0);
+  for (const w of wins) w.k = m(await kp(w.a, w.b));
+  const valid = wins.filter(w => w.k.n), prevW = valid.slice(0, -1), avgPrev = prevW.length ? prevW.reduce((s, w) => s + w.k.daily, 0) / prevW.length : null;
+  const unit = { day: 'يوم', week: 'أسبوع', month: 'شهر', quarter: 'ربع', half: 'نصف سنة', year: 'سنة' }[t];
+  const units = { day: 'أيام', week: 'أسابيع', month: 'أشهر', quarter: 'أرباع', half: 'أنصاف', year: 'سنوات' }[t];
+  const lastN = k => k === 1 ? `آخر ${unit}` : k === 2 ? `آخر ${{ day: 'يومين', week: 'أسبوعين', month: 'شهرين', quarter: 'ربعين', half: 'نصفين', year: 'سنتين' }[t]}` : k <= 10 ? `آخر ${nf(k)} ${units}` : `آخر ${nf(k)} ${unit}`;
+  // ملاحظات للإدارة
+  const notes = [];
+  if (hasP) {
+    const dN = ch(C.n, P.n), dB = ch(C.avg, P.avg);
+    notes.push(`المبيعات ${C.net >= P.net ? 'ارتفعت' : 'انخفضت'} ${nf(Math.abs(ch(C.net, P.net)) * 100, 1)}% عن ${cmpTxt} (${C.net >= P.net ? '+' : ''}${F.money(C.net - P.net)})، والسبب الأكبر ${Math.abs(dN || 0) >= Math.abs(dB || 0) ? `عدد الفواتير (${dN >= 0 ? '+' : ''}${nf(dN * 100, 1)}%)` : `متوسط الفاتورة (${dB >= 0 ? '+' : ''}${nf(dB * 100, 1)}%)`}.`);
+  } else notes.push(`لا توجد بيانات كافية لـ${cmpTxt} (البيانات تبدأ ${S.minDate})، فالأرقام بدون مقارنة.`);
+  if (avgPrev && valid.length >= 3) { const d = ch(C.daily, avgPrev); notes.push(`متوسط البيع اليومي ${F.money(C.daily)} — ${d >= 0 ? 'أعلى' : 'أقل'} من متوسط ${lastN(prevW.length)} قبله بـ ${nf(Math.abs(d) * 100, 1)}%.`); }
+  if (valid.length >= 3) { const best = valid.reduce((x, y) => y.k.daily > x.k.daily ? y : x); notes.push(`أعلى ${unit} بمتوسط البيع اليومي في ${lastN(valid.length)}:${best.l.replace(' *', '')} (${F.money(best.k.daily)}/يوم).`); }
+  if (C.rr != null) notes.push(`المردودات ${F.pct(C.rr)} من المبيعات${hasP && P.rr != null ? ` مقابل ${F.pct(P.rr)} في ${cmpTxt}` : ''}.`);
+  if (hasOn && C.onSh != null) notes.push(`الأونلاين وطلبات: ${F.pct(C.onSh)} من المبيعات، ${F.int(C.onN)} طلب بمتوسط ${F.money(C.onAvg)}${hasP && P.on ? ` — ${C.on >= P.on ? 'ارتفع' : 'انخفض'} ${nf(Math.abs(ch(C.on, P.on)) * 100, 1)}% عن ${cmpTxt}` : ''}.`);
+  const title = 'تقرير الإدارة — ' + RP[t].name.replace('التقرير ', ''), period = rpPeriodName(r0);
+  const tbl = (head, body) => `<table><thead><tr>${head.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table>`;
+  const trRows = valid.map((w, i) => `<tr${i === valid.length - 1 ? ' style="font-weight:700"' : ''}><td>${esc(w.l)}</td><td class="n">${F.money(w.k.net)}</td><td class="n">${F.int(w.k.n)}</td><td class="n">${F.money(w.k.avg)}</td><td class="n">${F.money(w.k.r)}</td><td class="n">${F.money(w.k.daily)}</td>${hasOn ? `<td class="n">${F.money(w.k.on)}</td><td class="n">${F.int(w.k.onN)}</td>` : ''}</tr>`).join('');
+  $('#rpPage').innerHTML = `
+    <div class="rh"><div><h1>زاد مارت — ${title}</h1><div class="sub">${esc(S.branch || 'فرع دير غبار')} · ${period}${t === 'week' || t === 'day' ? '' : ` (${a} إلى ${b})`} · ${hasP ? `مقارنة بـ${cmpTxt} (${pa} إلى ${pb})` : 'بدون مقارنة'}</div></div>
+      <div class="sub" style="text-align:left">المبالغ ${TAX_LBL()}<br>بعد خصم المردودات</div></div>
+    <div class="rk" style="grid-template-columns:repeat(3,1fr)">${kpis.map(([l, v, s]) => `<div><div class="l">${l}</div><div class="v">${v}</div><div class="p">${s}</div></div>`).join('')}</div>
+    <h2>الخلاصة</h2><ul style="margin:0;padding-inline-start:18px">${notes.map(n => `<li>${n}</li>`).join('')}</ul>
+    <h2>اتجاه المبيعات — ${lastN(valid.length)} <span class="note">(الأزرق الغامق = الفترة الحالية${valid.some(w => w.l.endsWith('*')) ? ' · * فترة غير مكتملة' : ''})</span></h2>
+    ${mgBars(valid.map(w => w.l), valid.map(w => w.k.net))}
+    ${tbl(['الفترة', 'المبيعات', 'الفواتير', 'متوسط الفاتورة', 'المردودات', 'البيع اليومي', ...(hasOn ? ['الأونلاين وطلبات', 'طلبات الأونلاين'] : [])], trRows)}
+    ${hasOn ? `<h2>الأونلاين وطلبات</h2>
+      <div class="rk">${[
+        tile('مبيعات الأونلاين وطلبات', F.money(C.on), C.on, P?.on, F.money),
+        tile('عدد الطلبات', F.int(C.onN), C.onN, P?.onN, F.int),
+        tile('متوسط الطلب', F.money(C.onAvg), C.onAvg, P?.onAvg, F.money),
+        ['الحصة من المبيعات', C.onSh != null ? F.pct(C.onSh) : '—', `${cmpTxt}: ${pv(P?.onSh, F.pct)}`],
+      ].map(([l, v, s]) => `<div><div class="l">${l}</div><div class="v">${v}</div><div class="p">${s}</div></div>`).join('')}</div>
+      <p class="note" style="margin:3px 0 0">طلبات الأونلاين وطلبات تُسجَّل على كاشير ONLINE نفسه، فهي مجموعة معاً هنا.</p>` : ''}
+    <div class="foot"><span>أُعدّ: ${new Date().toLocaleString('en-GB')}</span><span>${S.syncAt ? 'آخر تحديث من قاعدة البيانات: ' + new Date(S.syncAt).toLocaleString('en-GB') : ''}</span></div>`;
+  $('#reportWrap').hidden = false;
+  $('#reportWrap').scrollTop = 0;
+}
 async function buildReport() {
   busy('جارٍ إعداد التقرير…');
   try {
+    if ($('#rpStyle').value === 'mgmt') { await buildMgmtReport(rpRange()); return; }
     const r0 = rpRange(), { t, a, b, pa, pb } = r0, long = !!RP[t].m, multi = t !== 'day';
     const W = (x, y) => `d BETWEEN DATE '${x}' AND DATE '${y}'`, SALE = `inv NOT LIKE 'R|%'`;
     const kp = async (x, y) => (await q(`SELECT COALESCE(SUM(amount) FILTER (WHERE ${SALE}), 0)::DOUBLE AS s, COALESCE(-SUM(amount) FILTER (WHERE inv LIKE 'R|%'), 0)::DOUBLE AS r,
@@ -3920,7 +4028,7 @@ async function onDataLoaded() {
   S.seasonDirty = true;
   $('#catNotice').hidden = !S.flags.autoCat;
   $$('#tabs button').forEach(x => x.classList.toggle('on', x.dataset.tab === S.tab));
-  $('#welcome').hidden = true; $('#filters').hidden = false; $('#tabs').hidden = false; $('#btnSave').disabled = false; $('#btnReport').disabled = false;
+  $('#welcome').hidden = true; $('#filters').hidden = false; $('#tabs').hidden = false; $('#btnSave').disabled = false; $('#btnReport').disabled = false; $('#btnMgmt').disabled = false;
   buildFilters();
   await applyFilters();
 }
