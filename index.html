@@ -1954,7 +1954,7 @@ const FLOOR_DEFAULTS = {
   },
   // عائلات داخل أقسام أخرى لكنها في طابق مختلف (الألبان والأجبان والمجمدات داخل قسم البقالة في النظام)
   subs: { 'الالبان الطازجة/بيض': 0, 'الثلاجات - التبريد': 0, 'المجمدات': 0, 'بوظة': 0 },
-  pos: { POS01: 1, POS02: 1, POS03: 0, ONLINE: 0, POSLIB: 2 },
+  pos: { POS01: 1, POS02: 1, POS03: 0, ONLINE: 0, TALABAT: 0, POSLIB: 2 },
 };
 const SPLIT_SECTIONS = ['زاد عصائر وكوكتيل طازجة', 'اقسام برسم البيع'];
 function floorCfg() {
@@ -2088,7 +2088,7 @@ async function renderFloors(keepCfg) {
   if (topF) ins.push(`<b>${fName(topF.fl)}</b> يحقق ${F.pct(topF.s / tot.s)} من المبيعات.`);
   const f2 = fs.find(r => r.fl === 2);
   if (f2) ins.push(`الطابق الثاني يظهر في ${F.pct(f2.n / tot.n)} فقط من الفواتير — ${f2.n / tot.n < 0.1 ? 'حركة الزبائن إليه قليلة، وقد تساعد لافتات وعروض في الطوابق السفلى على جذبهم.' : ''}`);
-  for (const r of pw) if (r.pfl != null && r.other_only / r.n > 0.1) ins.push(/online/i.test(r.pos)
+  for (const r of pw) if (r.pfl != null && r.other_only / r.n > 0.1) ins.push(/online|talabat/i.test(r.pos)
     ? `<b>${esc(r.pos)}</b>: ${F.pct(r.other_only / r.n)} من الطلبات كل أصنافها من طوابق غير طابقه، و${F.pct(r.mixed / r.n)} من أكثر من طابق — التجهيز يحتاج التنقل بين الطوابق.`
     : `<b>${esc(r.pos)}</b> (${fName(r.pfl)}): ${F.pct(r.other_only / r.n)} من فواتيره كل أصنافها من طوابق أخرى، أي أن الزبون ${r.pfl === 0 ? 'نزل من الأعلى' : 'انتقل من طابق آخر'} ليدفع عليه.`);
   const unk = pw.filter(r => r.pfl == null);
@@ -2790,18 +2790,21 @@ function mgBars(labels, vals) {
 }
 async function buildMgmtReport(r0) {
   const { t, a, b, pa, pb } = r0;
-  const W = (x, y) => `d BETWEEN DATE '${x}' AND DATE '${y}'`, SALE = `inv NOT LIKE 'R|%'`, RET = `inv LIKE 'R|%'`, ON = `cashier = 'ONLINE'`;
+  const W = (x, y) => `d BETWEEN DATE '${x}' AND DATE '${y}'`, SALE = `inv NOT LIKE 'R|%'`, RET = `inv LIKE 'R|%'`, ON = `cashier = 'ONLINE'`, TB = `cashier = 'TALABAT'`;
   const kp = async (x, y) => (await q(`SELECT COALESCE(SUM(amount) FILTER (WHERE ${SALE}), 0)::DOUBLE AS s, COALESCE(-SUM(amount) FILTER (WHERE ${RET}), 0)::DOUBLE AS r,
       COUNT(DISTINCT inv) FILTER (WHERE ${SALE}) AS n, COUNT(DISTINCT d) AS days,
       COALESCE(SUM(amount) FILTER (WHERE ${SALE} AND ${ON}), 0)::DOUBLE AS os, COALESCE(-SUM(amount) FILTER (WHERE ${RET} AND ${ON}), 0)::DOUBLE AS orr,
-      COUNT(DISTINCT inv) FILTER (WHERE ${SALE} AND ${ON}) AS on_n, COUNT(cashier) AS hasc FROM sv WHERE ${W(x, y)}`))[0];
+      COUNT(DISTINCT inv) FILTER (WHERE ${SALE} AND ${ON}) AS on_n,
+      COALESCE(SUM(amount) FILTER (WHERE ${SALE} AND ${TB}), 0)::DOUBLE AS ts, COALESCE(-SUM(amount) FILTER (WHERE ${RET} AND ${TB}), 0)::DOUBLE AS trr,
+      COUNT(DISTINCT inv) FILTER (WHERE ${SALE} AND ${TB}) AS t_n, COUNT(cashier) AS hasc FROM sv WHERE ${W(x, y)}`))[0];
   const c = await kp(a, b), p0 = await kp(pa, pb);
   if (!c.n) { toast('لا توجد مبيعات في هذه الفترة.'); return; }
   const hasP = p0.n > 0 && p0.days >= c.days * 0.7, p = hasP ? p0 : null, cmpTxt = RP[t].cmp;
   const m = o => o && { net: o.s - o.r, n: o.n, avg: o.n ? o.s / o.n : null, r: o.r, rr: o.s ? o.r / o.s : null, daily: o.days ? (o.s - o.r) / o.days : null,
-    on: o.os - o.orr, onN: o.on_n, onAvg: o.on_n ? o.os / o.on_n : null, onSh: o.s - o.r ? (o.os - o.orr) / (o.s - o.r) : null };
-  // قسم الأونلاين يظهر فقط إن كان رقم الكاشير متوفراً وفيه طلبات أونلاين في الفترة أو فترة المقارنة
-  const C = m(c), P = m(p), hasOn = c.hasc > 0 && (c.on_n > 0 || p0.on_n > 0);
+    on: o.os - o.orr, onN: o.on_n, onAvg: o.on_n ? o.os / o.on_n : null, onSh: o.s - o.r ? (o.os - o.orr) / (o.s - o.r) : null,
+    tb: o.ts - o.trr, tbN: o.t_n, tbAvg: o.t_n ? o.ts / o.t_n : null, tbSh: o.s - o.r ? (o.ts - o.trr) / (o.s - o.r) : null };
+  // قسم الأونلاين يظهر فقط إن كان رقم الكاشير متوفراً وفيه طلبات أونلاين أو طلبات في الفترة أو فترة المقارنة
+  const C = m(c), P = m(p), hasOn = c.hasc > 0 && (c.on_n > 0 || p0.on_n > 0 || c.t_n > 0 || p0.t_n > 0);
   const ch = (v, pv) => pv ? (v - pv) / Math.abs(pv) : null;
   const dl = (v, pv, inv = false) => { const d = hasP ? ch(v, pv) : null; if (d == null || !isFinite(d)) return '<span class="note">—</span>';
     return `<span class="${Math.abs(d) < 0.0005 ? '' : (inv ? d < 0 : d > 0) ? 'up' : 'dn'}">${d > 0 ? '▲' : d < 0 ? '▼' : '■'} ${nf(Math.abs(d) * 100, 1)}%</span>`; };
@@ -2813,7 +2816,7 @@ async function buildMgmtReport(r0) {
     tile('متوسط الفاتورة', F.money(C.avg), C.avg, P?.avg, F.money),
     tile('المردودات', F.money(C.r), C.r, P?.r, F.money, true),
     tile('متوسط المبيعات اليومية', F.money(C.daily), C.daily, P?.daily, F.money),
-    ...(hasOn ? [tile('الأونلاين وطلبات', F.money(C.on), C.on, P?.on, F.money)] : []),
+    ...(hasOn ? [tile('الأونلاين (تطبيق زاد)', F.money(C.on), C.on, P?.on, F.money), tile('طلبات', F.money(C.tb), C.tb, P?.tb, F.money)] : []),
   ];
   // الاتجاه
   const wins = mgTrendWindows(r0);
@@ -2831,10 +2834,12 @@ async function buildMgmtReport(r0) {
   if (avgPrev && valid.length >= 3) { const d = ch(C.daily, avgPrev); notes.push(`متوسط البيع اليومي ${F.money(C.daily)} — ${d >= 0 ? 'أعلى' : 'أقل'} من متوسط ${lastN(prevW.length)} قبله بـ ${nf(Math.abs(d) * 100, 1)}%.`); }
   if (valid.length >= 3) { const best = valid.reduce((x, y) => y.k.daily > x.k.daily ? y : x); notes.push(`أعلى ${unit} بمتوسط البيع اليومي في ${lastN(valid.length)}:${best.l.replace(' *', '')} (${F.money(best.k.daily)}/يوم).`); }
   if (C.rr != null) notes.push(`المردودات ${F.pct(C.rr)} من المبيعات${hasP && P.rr != null ? ` مقابل ${F.pct(P.rr)} في ${cmpTxt}` : ''}.`);
-  if (hasOn && C.onSh != null) notes.push(`الأونلاين وطلبات: ${F.pct(C.onSh)} من المبيعات، ${F.int(C.onN)} طلب بمتوسط ${F.money(C.onAvg)}${hasP && P.on ? ` — ${C.on >= P.on ? 'ارتفع' : 'انخفض'} ${nf(Math.abs(ch(C.on, P.on)) * 100, 1)}% عن ${cmpTxt}` : ''}.`);
+  const chNote = (l, v, sh, n, avg, pv) => `${l}: ${F.money(v)} (${F.pct(sh)} من المبيعات)، ${F.int(n)} طلب بمتوسط ${F.money(avg)}${hasP && pv ? ` — ${v >= pv ? 'ارتفع' : 'انخفض'} ${nf(Math.abs(ch(v, pv)) * 100, 1)}% عن ${cmpTxt}` : ''}.`;
+  if (hasOn && C.onSh != null && C.onN) notes.push(chNote('الأونلاين (تطبيق زاد)', C.on, C.onSh, C.onN, C.onAvg, P?.on));
+  if (hasOn && C.tbSh != null && C.tbN) notes.push(chNote('طلبات', C.tb, C.tbSh, C.tbN, C.tbAvg, P?.tb));
   const title = 'تقرير الإدارة — ' + RP[t].name.replace('التقرير ', ''), period = rpPeriodName(r0);
   const tbl = (head, body) => `<table><thead><tr>${head.map(h => `<th>${h}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table>`;
-  const trRows = valid.map((w, i) => `<tr${i === valid.length - 1 ? ' style="font-weight:700"' : ''}><td>${esc(w.l)}</td><td class="n">${F.money(w.k.net)}</td><td class="n">${F.int(w.k.n)}</td><td class="n">${F.money(w.k.avg)}</td><td class="n">${F.money(w.k.r)}</td><td class="n">${F.money(w.k.daily)}</td>${hasOn ? `<td class="n">${F.money(w.k.on)}</td><td class="n">${F.int(w.k.onN)}</td>` : ''}</tr>`).join('');
+  const trRows = valid.map((w, i) => `<tr${i === valid.length - 1 ? ' style="font-weight:700"' : ''}><td>${esc(w.l)}</td><td class="n">${F.money(w.k.net)}</td><td class="n">${F.int(w.k.n)}</td><td class="n">${F.money(w.k.avg)}</td><td class="n">${F.money(w.k.r)}</td><td class="n">${F.money(w.k.daily)}</td>${hasOn ? `<td class="n">${F.money(w.k.on)}</td><td class="n">${F.money(w.k.tb)}</td>` : ''}</tr>`).join('');
   $('#rpPage').innerHTML = `
     <div class="rh"><div><h1>زاد مارت — ${title}</h1><div class="sub">${esc(S.branch || 'فرع دير غبار')} · ${period}${t === 'week' || t === 'day' ? '' : ` (${a} إلى ${b})`} · ${hasP ? `مقارنة بـ${cmpTxt} (${pa} إلى ${pb})` : 'بدون مقارنة'}</div></div>
       <div class="sub" style="text-align:left">المبالغ ${TAX_LBL()}<br>بعد خصم المردودات</div></div>
@@ -2842,15 +2847,15 @@ async function buildMgmtReport(r0) {
     <h2>الخلاصة</h2><ul style="margin:0;padding-inline-start:18px">${notes.map(n => `<li>${n}</li>`).join('')}</ul>
     <h2>اتجاه المبيعات — ${lastN(valid.length)} <span class="note">(الأزرق الغامق = الفترة الحالية${valid.some(w => w.l.endsWith('*')) ? ' · * فترة غير مكتملة' : ''})</span></h2>
     ${mgBars(valid.map(w => w.l), valid.map(w => w.k.net))}
-    ${tbl(['الفترة', 'المبيعات', 'الفواتير', 'متوسط الفاتورة', 'المردودات', 'البيع اليومي', ...(hasOn ? ['الأونلاين وطلبات', 'طلبات الأونلاين'] : [])], trRows)}
+    ${tbl(['الفترة', 'المبيعات', 'الفواتير', 'متوسط الفاتورة', 'المردودات', 'البيع اليومي', ...(hasOn ? ['الأونلاين', 'طلبات'] : [])], trRows)}
     ${hasOn ? `<h2>الأونلاين وطلبات</h2>
-      <div class="rk">${[
-        tile('مبيعات الأونلاين وطلبات', F.money(C.on), C.on, P?.on, F.money),
-        tile('عدد الطلبات', F.int(C.onN), C.onN, P?.onN, F.int),
-        tile('متوسط الطلب', F.money(C.onAvg), C.onAvg, P?.onAvg, F.money),
-        ['الحصة من المبيعات', C.onSh != null ? F.pct(C.onSh) : '—', `${cmpTxt}: ${pv(P?.onSh, F.pct)}`],
-      ].map(([l, v, s]) => `<div><div class="l">${l}</div><div class="v">${v}</div><div class="p">${s}</div></div>`).join('')}</div>
-      <p class="note" style="margin:3px 0 0">طلبات الأونلاين وطلبات تُسجَّل على كاشير ONLINE نفسه، فهي مجموعة معاً هنا.</p>` : ''}
+      ${[['الأونلاين (تطبيق زاد)', 'on'], ['طلبات', 'tb']].map(([nm, k]) => `<div class="rk">${[
+        tile(`مبيعات ${nm}`, F.money(C[k]), C[k], P?.[k], F.money),
+        tile('عدد الطلبات', F.int(C[k + 'N']), C[k + 'N'], P?.[k + 'N'], F.int),
+        tile('متوسط الطلب', F.money(C[k + 'Avg']), C[k + 'Avg'], P?.[k + 'Avg'], F.money),
+        ['الحصة من المبيعات', C[k + 'Sh'] != null ? F.pct(C[k + 'Sh']) : '—', `${cmpTxt}: ${pv(P?.[k + 'Sh'], F.pct)}`],
+      ].map(([l, v, s]) => `<div><div class="l">${l}</div><div class="v">${v}</div><div class="p">${s}</div></div>`).join('')}</div>`).join('')}
+      <p class="note" style="margin:3px 0 0">الأونلاين = الفواتير على حسابات تطبيق زاد (هند الفايز، أحمد أديب، أحمد أبو ليلى) وباقي فواتير كاشير ONLINE · طلبات = الفواتير على حساب ذمم شركة طلبات — أينما سُجّلت على الكاش.</p>` : ''}
     <div class="foot"><span>أُعدّ: ${new Date().toLocaleString('en-GB')}</span><span>${S.syncAt ? 'آخر تحديث من قاعدة البيانات: ' + new Date(S.syncAt).toLocaleString('en-GB') : ''}</span></div>`;
   $('#reportWrap').hidden = false;
   $('#reportWrap').scrollTop = 0;
