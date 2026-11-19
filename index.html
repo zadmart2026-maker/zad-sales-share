@@ -1037,6 +1037,10 @@ async function makeView() {
       UNION ALL SELECT sc.code, mn.f1, mn.f2, mn.f3, mn.f4, mn.f5 FROM sc JOIN mn ON mn.n = sc.n WHERE sc.code NOT IN (SELECT code FROM mc)`);
     // نسخة في الذاكرة لفلتر العائلات في جداول الأصناف (attachFam)
     FAMOF = new Map((await q(`SELECT code, ANY_VALUE(f1) AS f1, ANY_VALUE(f2) AS f2, ANY_VALUE(f3) AS f3 FROM fam_map GROUP BY code`)).map(r => [r.code, r]));
+    S.repDirty = true;
+  }
+  // جدول باركود ← الباركود الرئيسي: يُبنى أيضاً عند الفتح من النسخة المحفوظة (حيث لا يُعاد بناء العائلات)
+  if (S.repDirty !== false) {
     // تجميع الباركودات تحت بطاقة الصنف مثل تقارير النظام: كل باركود يُستبدل بالباركود الرئيسي لبطاقته
     // (باركود البطاقة في جدول المخزون، وإلا أصغر باركود فيها) — فتظهر كل شاشات اللوحة بالصنف وليس بالباركود
     await q(`CREATE OR REPLACE TABLE code_rep AS
@@ -1046,7 +1050,7 @@ async function makeView() {
     S.cards = (await q(`SELECT COUNT(*) n FROM code_rep`))[0].n > 0;
     await q(`CREATE OR REPLACE VIEW offday_v AS SELECT o.* REPLACE (COALESCE(r.rep, o.code) AS code) FROM offday o LEFT JOIN code_rep r ON r.code = o.code`);
     await q(`CREATE OR REPLACE VIEW deleted_v AS SELECT x.* REPLACE (COALESCE(r.rep, x.code) AS code) FROM deleted x LEFT JOIN code_rep r ON r.code = x.code`);
-    S.famDirty = false;
+    S.famDirty = false; S.repDirty = false;
   }
   // مع وجود دليل بعائلات: الأصناف غير الموجودة فيه تُجمع تحت قسم واحد، وتحتها قسمها التقديري
   const miss = S.hasFam ? lit(NOT_IN_MASTER) : 'x.cat', missF2 = S.hasFam ? 'x.cat' : 'NULL';
@@ -4641,6 +4645,7 @@ async function buildFromFiles(list, ch = null) {
 async function loadRest() {
   $('#status').textContent = 'البيانات الأخيرة جاهزة · جارٍ تحميل الأشهر الأقدم في الخلفية…';
   await restoreDeleted();
+  S.repDirty = true;   // المخزون وصل الآن، فيُعاد تحديد الباركود الرئيسي لكل بطاقة
   const old = await IDB.get('salesOld');
   if (old) {
     await S.db.registerFileBuffer('zad_restore_old.parquet', new Uint8Array(old));
