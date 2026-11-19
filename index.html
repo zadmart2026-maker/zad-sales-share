@@ -607,6 +607,10 @@ tbody tr.drill td:first-child::after{content:" ‹";color:var(--muted)}
       <div class="card"><div class="card-h"><h3>تقدّم الأقسام</h3><span id="tgEditBar" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap"></span></div>
         <p class="hint" style="margin-bottom:8px">الشريط يبيّن المتوقع لآخر الشهر، والخطوط عليه هي المستويات 1 و2 و3. <b>الهامش</b> (قبل الضريبة) يقارن هامش الربح هذا الشهر بالشهر السابق: إذا نزل أكثر من نقطة تظهر ⚠، لأن رفع البيع بالخصومات على حساب الربح لا يُحتسب.</p>
         <div class="tbl-wrap"><table id="tblTg"></table></div></div>
+      <div class="card" id="tgChCard" hidden><h3>أهداف الأونلاين وطلبات</h3>
+        <p class="hint" style="margin-bottom:8px">نفس طريقة الأقسام، بس على مبيعات كل قناة: <b>الأونلاين</b> = الفواتير على حسابات تطبيق زاد (هند الفايز، أحمد أديب، أحمد أبو ليلى) وباقي فواتير كاشير ONLINE، و<b>طلبات</b> = الفواتير على حساب ذمم شركة طلبات، أينما سُجّلت على الكاش.
+          مبيعاتها داخلة أصلاً بالأقسام فوق، فما بتنضاف لمجموع «كل الأقسام». أهدافها اليدوية بتنكتب من نفس زر <b>✏️ تعديل الأهداف يدوياً</b>.</p>
+        <div class="tbl-wrap"><table id="tblTgCh"></table></div></div>
       <div class="card"><div class="card-h"><h3>المبيعات التراكمية مقابل المستويات</h3><select id="tgDept"></select></div>
         <div class="chart" id="chTg" style="height:320px"></div></div>
       <div class="card"><h3>البيع اليومي لكل قسم</h3>
@@ -1562,7 +1566,8 @@ async function renderTargets() {
   if (!n1) {
     TG = null;
     $('#tgKpis').innerHTML = `<div class="kpi"><div class="l">لا يمكن حساب الأهداف</div><div class="p">لا توجد بيانات للفترة ${dLbl(w1[0])} – ${dLbl(w1[1])}، والأهداف تُبنى على أداء الفترة السابقة.</div></div>`;
-    $('#tblTg').innerHTML = $('#tblTgDay').innerHTML = ''; $('#tgDept').innerHTML = $('#tgEditBar').innerHTML = ''; echarts.getInstanceByDom($('#chTg'))?.clear();
+    $('#tgChCard').hidden = true;
+    $('#tblTg').innerHTML = $('#tblTgDay').innerHTML = $('#tblTgCh').innerHTML = ''; $('#tgDept').innerHTML = $('#tgEditBar').innerHTML = ''; echarts.getInstanceByDom($('#chTg'))?.clear();
     return;
   }
   const man = await tgLoad(P);
@@ -1587,14 +1592,31 @@ async function renderTargets() {
     o.m = div(o.pr, o.sc); o.m1 = div(o.pr1, o.sc1);
   };
   const rows = [...G.values()].filter(o => o.s1 > 0);
-  for (const o of rows) {
+  const setT = o => {
     const r1 = o.s1 / n1, r2 = n2 ? o.s2 / n2 : 0, k = Math.min(TG_MAX, Math.max(TG_MIN, r2 / r1));
     o.t1 = r1 * nDays; o.t3 = r1 * k * nDays; o.t2 = (o.t1 + o.t3) / 2;
     o.a1 = o.t1; o.a2 = o.t2; o.a3 = o.t3;
-    const mv = man[o.name];
+    const mv = man[o.key || o.name];
     if (mv) { o.t1 = mv.t1; o.t2 = mv.t2; o.t3 = mv.t3; o.manual = true; }
     fin(o);
-  }
+  };
+  rows.forEach(setT);
+  // قنوات الطلب (الأونلاين وطلبات) بنفس الطريقة، من كاشير الفاتورة الموحّد؛ أهدافها اليدوية محفوظة باسم «قناة: …» حتى ما تختلط بالأقسام
+  const chW = `cashier IN ('ONLINE', 'TALABAT') AND (${inW(w2)} OR ${inW(w1)} OR ${inW([M, end])})`;
+  const chAgg = await q(`SELECT cashier c, ${mk} m, SUM(amt_incl)::DOUBLE s, SUM(CASE WHEN line_cost IS NOT NULL THEN ${A} - line_cost END)::DOUBLE pr, SUM(CASE WHEN line_cost IS NOT NULL THEN ${A} END)::DOUBLE sc
+    FROM sv WHERE ${chW} GROUP BY 1, 2`);
+  const chDay = await q(`SELECT cashier c, strftime(d, '%Y-%m-%d') d, SUM(amt_incl)::DOUBLE s FROM sv WHERE ${chW} AND d BETWEEN DATE '${M}' AND DATE '${end}' GROUP BY 1, 2`);
+  const ch = [['ONLINE', 'الأونلاين (تطبيق زاد)'], ['TALABAT', 'طلبات']].map(([c, name]) => {
+    const o = blank(name); o.key = 'قناة: ' + name;
+    for (const r of chAgg) if (r.c === c) {
+      if (r.m === 'p1') { o.s1 += r.s; o.pr1 += r.pr || 0; o.sc1 += r.sc || 0; }
+      else if (r.m === 'p2') o.s2 += r.s;
+      else { o.mtd += r.s; o.pr += r.pr || 0; o.sc += r.sc || 0; }
+    }
+    for (const r of chDay) if (r.c === c) { o.days[r.d] = (o.days[r.d] || 0) + r.s; if (r.d <= doneEnd) o.done += r.s; }
+    return o;
+  }).filter(o => o.s1 > 0);
+  ch.forEach(setT);
   rows.sort((a, b) => (a.name === TG_OTHER) - (b.name === TG_OTHER) || b.t2 - a.t2);
   const tot = blank('كل الأقسام');
   for (const o of rows) {
@@ -1602,7 +1624,7 @@ async function renderTargets() {
     for (const [d, v] of Object.entries(o.days)) tot.days[d] = (tot.days[d] || 0) + v;
   }
   fin(tot);
-  TG = { rows, tot, M, end, nDays, doneEnd, P };
+  TG = { rows, tot, ch, M, end, nDays, doneEnd, P };
 
   const lvHTML = o => o.lv == null ? '—' : `<span class="tg-lv l${o.lv}">${TG_LV[o.lv]}</span>`;
   const started = elapsed > 0;
@@ -1622,15 +1644,17 @@ async function renderTargets() {
   const margin = o => o.m == null ? '—' : F.pct(o.m) + (o.m1 != null && o.m < o.m1 - 0.01 ? ` <span class="d bad" title="الشهر السابق ${F.pct(o.m1)}">⚠ ${nf((o.m1 - o.m) * 100, 1)} نقطة</span>` : '');
   const ed = !!S.tgEdit && TGS.admin;
   const tcell = (o, k, b) => ed && o !== tot
-    ? `<td class="num"><input type="number" class="tg-in" min="0" step="100" data-n="${esc(o.name)}" data-k="${k}" value="${Math.round(o[k])}" title="التلقائي: ${F.money(o['a' + k[1]])}"></td>`
+    ? `<td class="num"><input type="number" class="tg-in" min="0" step="100" data-n="${esc(o.key || o.name)}" data-k="${k}" value="${Math.round(o[k])}" title="التلقائي: ${F.money(o['a' + k[1]])}"></td>`
     : `<td class="num">${b ? `<b>${F.money(o[k])}</b>` : F.money(o[k])}</td>`;
   const tr = (o, b) => `<tr${b ? ' style="font-weight:600"' : ''}><td>${esc(o.name)}${o.manual ? ' <span class="tg-man" title="هدف يدوي — التلقائي: ' + F.money(o.a2) + '">يدوي</span>' : ''}</td>${tcell(o, 't1')}${tcell(o, 't2', true)}${tcell(o, 't3')}
     <td class="num">${F.money(o.mtd)}</td><td class="num">${o.proj == null ? '—' : F.money(o.proj)}</td><td>${bar(o)}</td><td>${lvHTML(o)}</td>
     <td class="num">${o.need == null ? '—' : F.money(o.need)}</td>${S.noProfit ? '' : `<td>${margin(o)}</td>`}</tr>`;
-  $('#tblTg').innerHTML = `<thead><tr><th>القسم</th><th class="num">المستوى 1</th><th class="num">المستوى 2 (الهدف)</th><th class="num">المستوى 3</th><th class="num">المحقق</th>
-    <th class="num">المتوقع لآخر الفترة</th><th>التقدّم</th><th>المستوى المتوقع</th><th class="num">المطلوب يومياً للهدف</th>${S.noProfit ? '' : '<th>الهامش</th>'}</tr></thead>
-    <tbody>${rows.map(o => tr(o)).join('')}${tr(tot, true)}</tbody>`;
-  const nMan = rows.filter(o => o.manual).length;
+  const thead = first => `<thead><tr><th>${first}</th><th class="num">المستوى 1</th><th class="num">المستوى 2 (الهدف)</th><th class="num">المستوى 3</th><th class="num">المحقق</th>
+    <th class="num">المتوقع لآخر الفترة</th><th>التقدّم</th><th>المستوى المتوقع</th><th class="num">المطلوب يومياً للهدف</th>${S.noProfit ? '' : '<th>الهامش</th>'}</tr></thead>`;
+  $('#tblTg').innerHTML = `${thead('القسم')}<tbody>${rows.map(o => tr(o)).join('')}${tr(tot, true)}</tbody>`;
+  $('#tgChCard').hidden = !ch.length;
+  $('#tblTgCh').innerHTML = ch.length ? `${thead('القناة')}<tbody>${ch.map(o => tr(o)).join('')}</tbody>` : '';
+  const nMan = [...rows, ...ch].filter(o => o.manual).length;
   $('#tgEditBar').innerHTML = ed
     ? `<span class="hint">غيّر <b>المستوى 2 (الهدف)</b> والمستويان 1 و3 بيتحركوا معه بنفس النسبة. الخانة الفارغة ترجع للتلقائي.</span>
        <button type="button" class="btn primary" id="tgSave">حفظ الأهداف</button>
@@ -1639,7 +1663,7 @@ async function renderTargets() {
     : `${nMan ? `<span class="hint">${nMan} قسم بهدف يدوي لهذه الفترة</span>` : ''}${TGS.admin ? '<button type="button" class="btn" id="tgEdit">✏️ تعديل الأهداف يدوياً</button>' : ''}${TGS.err ? `<span class="hint" style="color:var(--bad)">${esc(TGS.err)}</span>` : ''}`;
 
   // جدول البيع اليومي: الأحدث أولاً، والخلية تُلوَّن مقارنة بهدف المستوى 2 اليومي
-  const cols = [...rows, tot], days = [];
+  const cols = [...rows, tot, ...ch], days = [];
   for (let d = minS(end, S.maxDate); d >= M; d = addDays(d, -1)) days.push(d);
   const cell = (o, d) => {
     const v = o.days[d] || 0, t = o.t2 / nDays, part = d > doneEnd;
@@ -1649,13 +1673,14 @@ async function renderTargets() {
     <tbody>${days.length ? days.map(d => `<tr><td>${AR_DAYS[D(d).getUTCDay()]} ${d.slice(8)}/${d.slice(5, 7)}${d > doneEnd ? ' <span class="hint">(جارٍ)</span>' : ''}</td>${cols.map(o => cell(o, d)).join('')}</tr>`).join('')
       : `<tr><td colspan="${cols.length + 1}" class="hint">لا توجد مبيعات في هذا الشهر بعد.</td></tr>`}</tbody>`;
 
-  if (![TG_OTHER, ...rows.map(o => o.name)].includes(S.tgDept)) S.tgDept = '';
-  $('#tgDept').innerHTML = `<option value="">كل الأقسام</option>` + rows.map(o => `<option${o.name === S.tgDept ? ' selected' : ''}>${esc(o.name)}</option>`).join('');
+  if (![TG_OTHER, ...rows.map(o => o.name), ...ch.map(o => o.name)].includes(S.tgDept)) S.tgDept = '';
+  $('#tgDept').innerHTML = `<option value="">كل الأقسام</option>` + rows.map(o => `<option${o.name === S.tgDept ? ' selected' : ''}>${esc(o.name)}</option>`).join('')
+    + (ch.length ? `<optgroup label="القنوات">${ch.map(o => `<option${o.name === S.tgDept ? ' selected' : ''}>${esc(o.name)}</option>`).join('')}</optgroup>` : '');
   drawTgChart();
 }
 function drawTgChart() {
   if (!TG) return;
-  const { M, nDays } = TG, o = TG.rows.find(r => r.name === S.tgDept) || TG.tot;
+  const { M, nDays } = TG, o = [...TG.rows, ...TG.ch].find(r => r.name === S.tgDept) || TG.tot;
   const xs = Array.from({ length: nDays }, (_, i) => addDays(M, i));
   let c = 0;
   const act = xs.map(x => x > S.maxDate ? null : (c += o.days[x] || 0));
@@ -1747,18 +1772,18 @@ $('#tgEditBar').addEventListener('click', async e => {
     if (!confirm(`حذف كل الأهداف اليدوية لـ ${TG.P.label} والرجوع للأهداف التلقائية؟`)) return;
   } else {
     const vals = {};
-    for (const inp of $$('#tblTg .tg-in')) {
+    for (const inp of $$('#tblTg .tg-in, #tblTgCh .tg-in')) {
       const v = inp.value.trim() === '' ? null : Number(inp.value);
       if (v != null && !(v >= 0)) { alert('أدخل أرقاماً صحيحة'); inp.focus(); return; }
       (vals[inp.dataset.n] ||= {})[inp.dataset.k] = v;
     }
-    for (const o of TG.rows) {
-      const v = vals[o.name]; if (!v) continue;
+    for (const o of [...TG.rows, ...TG.ch]) {
+      const v = vals[o.key || o.name]; if (!v) continue;
       const auto = [o.a1, o.a2, o.a3].map(Math.round), cur = [o.t1, o.t2, o.t3].map(Math.round);
       const t = ['t1', 't2', 't3'].map((k, i) => v[k] ?? auto[i]);
       if (t[1] !== cur[1] && t[0] === cur[0] && t[2] === cur[2] && cur[1] > 0) { t[0] = Math.round(cur[0] * t[1] / cur[1]); t[2] = Math.round(cur[2] * t[1] / cur[1]); }
       if (!(t[0] <= t[1] && t[1] <= t[2])) { alert(`${o.name}: لازم المستوى 1 ≤ الهدف ≤ المستوى 3`); return; }
-      if (t.some((x, i) => x !== auto[i])) m[o.name] = { t1: t[0], t2: t[1], t3: t[2] };
+      if (t.some((x, i) => x !== auto[i])) m[o.key || o.name] = { t1: t[0], t2: t[1], t3: t[2] };
     }
   }
   busy('جارٍ حفظ الأهداف…');
