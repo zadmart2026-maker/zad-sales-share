@@ -2773,6 +2773,24 @@ $('#rpDate').addEventListener('change', rpHint);
 $('#dlgReport').addEventListener('close', () => { if ($('#dlgReport').returnValue === 'ok') buildReport(); });
 $('#rpClose').onclick = () => { $('#reportWrap').hidden = true; };
 $('#rpPrint').onclick = () => window.print();
+// تقرير الإدارة التلقائي (للإرسال المجدول بالإيميل): ‎?autoreport=week أو month يبني التقرير لآخر فترة مكتملة،
+// والنتيجة في <html data-autoreport> ‏('ready' أو 'login' أو 'error: …') ليقرأها برنامج الإرسال ويحفظ الصفحة PDF
+const AUTO_RP = new URLSearchParams(location.search).get('autoreport');
+const autoRpSet = v => { if (AUTO_RP) document.documentElement.dataset.autoreport = v; };
+async function autoReport() {
+  if (!AUTO_RP) return;
+  try {
+    if (!['week', 'month'].includes(AUTO_RP)) return autoRpSet('error: unknown type ' + AUTO_RP);
+    if (!S.loaded) return autoRpSet('error: no data');
+    $('#rpStyle').value = 'mgmt'; $('#rpType').value = AUTO_RP;
+    // ‎&date=YYYY-MM-DD: آخر يوم في الفترة (برنامج الإرسال يحدده حتى لا تختلف الفترة إذا تأخر التشغيل)
+    const dt = new URLSearchParams(location.search).get('date');
+    if (dt && dt > S.maxDate) return autoRpSet('error: data ends ' + S.maxDate);
+    $('#rpDate').value = dt ? maxS(dt, S.minDate) : maxS(rpDefaultDate(AUTO_RP), S.minDate);
+    await buildMgmtReport(rpRange());
+    autoRpSet($('#reportWrap').hidden ? 'error: no sales in the period' : 'ready');
+  } catch (e) { console.error(e); autoRpSet('error: ' + (e.message || e)); }
+}
 
 /** أعمدة مزدوجة بسيطة (الحالية والمقارنة) كـ SVG حتى تُطبع بوضوح */
 function rpBars(labels, cur, prev) {
@@ -4808,12 +4826,12 @@ $('#loginForm').addEventListener('submit', async e => {
 });
 $('#btnLogout').onclick = async () => { await sb.auth.signOut(); await wipeLocal(); location.reload(); };
 function startFailed(e) {
-  console.error(e); busyN = 1; busy();
+  console.error(e); busyN = 1; busy(); autoRpSet('error: ' + (e.message || e));
   $('#status').textContent = 'تعذر تشغيل البرنامج: ' + (e.message || e) + ' — تأكد من الاتصال بالإنترنت واستخدم Chrome أو Edge حديثاً.';
 }
 (async () => {
   const { data: { session } } = await sb.auth.getSession();
-  if (session) await startApp(session.user); else $('#loginForm').hidden = false;
+  if (session) { await startApp(session.user); await autoReport(); } else { $('#loginForm').hidden = false; autoRpSet('login'); }
 })().catch(startFailed);
 </script>
 </body>
