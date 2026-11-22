@@ -2782,6 +2782,10 @@ async function autoReport() {
   try {
     if (!['week', 'month'].includes(AUTO_RP)) return autoRpSet('error: unknown type ' + AUTO_RP);
     if (!S.loaded) return autoRpSet('error: no data');
+    // ‎&tax=incl: المبالغ شاملة ضريبة المبيعات (الافتراضي عند الفتح قبل الضريبة)
+    const tax = new URLSearchParams(location.search).get('tax');
+    if (tax === 'incl' && S.net) { S.net = false; $('#fTax').value = 'incl'; await makeView(); }
+    else if (tax === 'net' && !S.net) { S.net = true; $('#fTax').value = 'net'; await makeView(); }
     $('#rpStyle').value = 'mgmt'; $('#rpType').value = AUTO_RP;
     // ‎&date=YYYY-MM-DD: آخر يوم في الفترة (برنامج الإرسال يحدده حتى لا تختلف الفترة إذا تأخر التشغيل)
     const dt = new URLSearchParams(location.search).get('date');
