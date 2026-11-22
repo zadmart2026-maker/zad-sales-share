@@ -4773,6 +4773,9 @@ function drawPermUser() {
 function drawPermAdmin() { $('#pmDetails').hidden = $('#pmAdmin').checked; $('#pmAdminNote').hidden = !$('#pmAdmin').checked; }
 async function savePerms() {
   const id = $('#pmUser').value, checked = sel => $$(`${sel} input:checked`).map(x => x.value);
+  // غير المدير يحتاج خانة وقسماً واحداً على الأقل حتى يفتح البرنامج
+  if (!$('#pmAdmin').checked && (!checked('#pmTabs').length || !checked('#pmDepts').length)
+    && !confirm(`${!checked('#pmTabs').length ? 'لم تحدد أي خانة' : 'لم تحدد أي قسم'} لهذا المستخدم، فلن يستطيع فتح البرنامج (البيانات وحتى تواريخ الصلاحية تُعرض حسب الأقسام).\nحفظ على كل حال؟`)) return;
   $('#pmSave').disabled = true; $('#pmMsg').textContent = '';
   try {
     must(await sb.from('user_profile').upsert({ user_id: id, full_name: $('#pmName').value.trim() || null, is_admin: $('#pmAdmin').checked, can_see_profit: $('#pmProfit').checked, tabs: [...checked('#pmTabs'), ...checked('#pmReports')] }));
@@ -4799,7 +4802,14 @@ async function startApp(user) {
   PERM.tabs = PERM.profile?.tabs || [];
   TGS.ready = false; S.tgEdit = false;
   $('#whoAmI').textContent = PERM.profile?.full_name || user.email;
-  if (!PERM.profile || (!PERM.profile.is_admin && (!PERM.tabs.length || !PERM.depts.length))) { await wipeLocal(); $('#status').textContent = 'لا توجد لك صلاحيات بعد. تواصل مع الإدارة.'; return; }
+  if (!PERM.profile || (!PERM.profile.is_admin && (!PERM.tabs.length || !PERM.depts.length))) {
+    await wipeLocal();
+    // يُقال بالضبط الناقص: الخانات أو الأقسام (البيانات تُقرأ حسب الأقسام، فبدونها لا يُفتح البرنامج)
+    const why = !PERM.profile ? 'لا توجد لك صلاحيات بعد' : !PERM.tabs.length ? 'لم تُحدَّد لك خانات بعد' : 'لم تُحدَّد لك أقسام بعد (حتى خانة تواريخ الصلاحية تحتاج الأقسام)';
+    $('#status').textContent = why + '. تواصل مع الإدارة.';
+    $('#btnMgmt').hidden = $('#btnReport').hidden = true;
+    return;
+  }
   S.noProfit = !(PERM.profile.is_admin || PERM.profile.can_see_profit);
   $('#btnPerms').hidden = !PERM.profile.is_admin;
   // تغيّر المستخدم أو صلاحياته: لا يبقى في المتصفح شيء من الصلاحيات السابقة
