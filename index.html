@@ -710,6 +710,8 @@ tbody tr.drill td:first-child::after{content:" ‹";color:var(--muted)}
       <div class="pm-sec"><label class="pm-one"><input type="checkbox" id="pmProfit"><b>إظهار هامش الربح ونسب الربح والكلفة</b></label>
         <p class="hint">بدون هذه الصلاحية لا تصل الكلفة إلى متصفح المستخدم أصلاً.</p></div>
       <div class="pm-sec"><h3>الخانات</h3><div class="pm-grid" id="pmTabs"></div></div>
+      <div class="pm-sec"><h3>التقارير</h3><div class="pm-grid" id="pmReports"></div>
+        <p class="hint">بدون هذه الصلاحية لا يظهر زر التقرير للمستخدم. التقرير يعرض فقط أقسام المستخدم المسموحة.</p></div>
       <div class="pm-sec"><h3>الأقسام</h3><div class="pm-grid" id="pmDepts"></div></div>
     </div>
     <p class="hint" id="pmMsg" role="status" style="min-height:18px"></p>
@@ -2760,6 +2762,9 @@ const DAY_AR = ['الأحد', 'الإثنين', 'الثلاثاء', 'الأرب�
 $('#btnReport').onclick = () => {
   // افتراضياً آخر يوم مكتمل: إن كان آخر يوم في البيانات هو اليوم، فالتقرير اليومي ليوم أمس
   $('#rpDate').min = S.minDate; $('#rpDate').max = S.maxDate; $('#rpDate').value = maxS(rpDefaultDate($('#rpType').value), S.minDate);
+  // يظهر من أنواع التقرير المسموح للمستخدم فقط (صلاحيات التقارير)
+  for (const o of $('#rpStyle').options) o.disabled = o.hidden = !rpAllowed(o.value);
+  if (!rpAllowed($('#rpStyle').value)) { const ok = [...$('#rpStyle').options].find(o => !o.disabled); if (!ok) return; $('#rpStyle').value = ok.value; }
   rpHint(); $('#dlgReport').showModal();
 };
 // تقرير الإدارة: نفس النافذة مضبوطة على «للإدارة»، وأسبوعي إن كان النوع المختار يومياً
@@ -2782,6 +2787,7 @@ async function autoReport() {
   try {
     if (!['week', 'month'].includes(AUTO_RP)) return autoRpSet('error: unknown type ' + AUTO_RP);
     if (!S.loaded) return autoRpSet('error: no data');
+    if (!rpAllowed('mgmt')) return autoRpSet('error: this account has no permission for the management report');
     // ‎&tax=incl: المبالغ شاملة ضريبة المبيعات (الافتراضي عند الفتح قبل الضريبة)
     const tax = new URLSearchParams(location.search).get('tax');
     if (tax === 'incl' && S.net) { S.net = false; $('#fTax').value = 'incl'; await makeView(); }
@@ -2908,6 +2914,7 @@ async function buildMgmtReport(r0) {
   $('#reportWrap').scrollTop = 0;
 }
 async function buildReport() {
+  if (!rpAllowed($('#rpStyle').value)) return;
   busy('جارٍ إعداد التقرير…');
   try {
     if ($('#rpStyle').value === 'mgmt') { await buildMgmtReport(rpRange()); return; }
@@ -4522,7 +4529,14 @@ function applyTabPerms() {
   const allowed = new Set(PERM.profile?.is_admin ? TAB_LIST.map(t => t[0]) : PERM.tabs);
   $$('#tabs button').forEach(b => { if (!allowed.has(b.dataset.tab)) b.hidden = true; });
   if (!allowed.has(S.tab) || $(`#tabs button[data-tab="${S.tab}"]`)?.hidden) S.tab = TAB_LIST.map(t => t[0]).find(t => allowed.has(t) && !$(`#tabs button[data-tab="${t}"]`).hidden) || S.tab;
-  $('#btnReport').hidden = !allowed.has('overview');
+  $('#btnReport').hidden = !rpAllowed('ops');
+  $('#btnMgmt').hidden = !rpAllowed('mgmt');
+}
+// صلاحيات التقارير: تُحفظ مع الخانات في user_profile.tabs (rp_mgmt و rp_ops)؛ المدير العام يرى الكل
+const RP_PERMS = [['rp_mgmt', 'mgmt', '📊 تقرير الإدارة'], ['rp_ops', 'ops', '🖨 التقرير المطبوع (التشغيلي)']];
+function rpAllowed(style) {
+  const k = RP_PERMS.find(r => r[1] === style)?.[0];
+  return !!k && (!!PERM.profile?.is_admin || PERM.tabs.includes(k));
 }
 const must = r => { if (r.error) throw r.error; return r.data; };
 function wipeLocal() { return new Promise(res => { const r = indexedDB.deleteDatabase('zadmart'); r.onsuccess = r.onerror = r.onblocked = () => res(); }); }
@@ -4751,6 +4765,7 @@ function drawPermUser() {
   $('#pmAdmin').checked = !!p.is_admin; $('#pmAdmin').disabled = id === PERM.user.id;
   $('#pmProfit').checked = !!p.can_see_profit;
   $('#pmTabs').innerHTML = TAB_LIST.map(([k, l]) => `<label><input type="checkbox" value="${esc(k)}" ${tabs.has(k) ? 'checked' : ''}>${esc(l)}</label>`).join('');
+  $('#pmReports').innerHTML = RP_PERMS.map(([k, , l]) => `<label><input type="checkbox" value="${esc(k)}" ${tabs.has(k) ? 'checked' : ''}>${esc(l)}</label>`).join('');
   $('#pmDepts').innerHTML = PM.depts.map(d => `<label><input type="checkbox" value="${esc(d.code)}" ${mine.has(d.code) ? 'checked' : ''}>${esc(d.name)}</label>`).join('');
   drawPermAdmin();
   $('#pmMsg').textContent = '';
@@ -4760,7 +4775,7 @@ async function savePerms() {
   const id = $('#pmUser').value, checked = sel => $$(`${sel} input:checked`).map(x => x.value);
   $('#pmSave').disabled = true; $('#pmMsg').textContent = '';
   try {
-    must(await sb.from('user_profile').upsert({ user_id: id, full_name: $('#pmName').value.trim() || null, is_admin: $('#pmAdmin').checked, can_see_profit: $('#pmProfit').checked, tabs: checked('#pmTabs') }));
+    must(await sb.from('user_profile').upsert({ user_id: id, full_name: $('#pmName').value.trim() || null, is_admin: $('#pmAdmin').checked, can_see_profit: $('#pmProfit').checked, tabs: [...checked('#pmTabs'), ...checked('#pmReports')] }));
     must(await sb.from('user_dept').delete().eq('user_id', id));
     const depts = checked('#pmDepts');
     if (depts.length) must(await sb.from('user_dept').insert(depts.map(dept => ({ user_id: id, dept }))));
